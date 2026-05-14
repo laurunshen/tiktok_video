@@ -373,9 +373,16 @@ Expression: warm, fast-talking, spontaneous. Like sharing a secret. NOT posed or
 Body language: loose, continuous, slightly imprecise movements. No theatrical pauses.
 
 [SPEAKING STYLE]
-FAST pace throughout — excited, can't wait to tell you. Barely pauses between sentences.
-Natural speech: brief "um" or "like" from transcript where they appeared.
-One or two interjections: "Honestly", "Oh my god", "Seriously" — only where natural.
+TONE: Match pass1Result.narrative_dna.tone_register. Pick the matching delivery style:
+  • EXCITED_BEST_FRIEND — high-energy, fast, exclamations like "OMG you guys", barely pauses, voice goes up at end of sentences
+  • CALM_REVIEWER — measured medium pace, lower-pitched, expert tone, slight pauses for emphasis
+  • SASSY_CONFIDENT — moderate pace with attitude, slight smirk in voice, occasional eye-roll inflection
+  • GEN_Z_CASUAL — laid-back medium-slow pace, drops "literally", "deadass", "no cap", trailing off at end of phrases
+  • SOFT_INTIMATE — quiet, slower, breathy ASMR-like quality, like sharing in bedroom
+  • VULNERABLE_AUTHENTIC — slightly hesitant, real, occasional pauses to find words, like being honest
+  • DEADPAN_FUNNY — flat affect with comedic timing, slight pause before punch lines
+  • TEACHER_EDUCATIONAL — clear articulation, slight pauses to let info land, "let me show you" energy
+Natural speech patterns appropriate to the tone.
 NOT a broadcaster voice.
 
 [AVOID]
@@ -896,6 +903,56 @@ CONTENT POLICY (apply to compressed_script):
 - profanity (fuck, shit, damn) → remove or replace with "literally", "honestly", "seriously"
 - explicit sexual descriptors → neutral fit/shape language
 
+TASK 4 — NARRATIVE DNA EXTRACTION (THIS IS WHAT MAKES THIS REFERENCE UNIQUE):
+This is the most important task. The goal is to identify what makes THIS specific reference video different from a generic "person talks about bra" template. Pass 2 will use this DNA to write a Seedance prompt that copies the SOUL of this reference, not just its style.
+
+For each field below, watch the reference video carefully and identify the SPECIFIC pattern (NOT generic descriptions):
+
+A. hook_type — Which of these opening hook types does the reference use? Pick ONE:
+   • "PAIN_POINT_RANT" — opens by complaining about a problem (e.g. "I HATE that all my bras..."), then reveals product as solution
+   • "RESULT_FIRST" — opens by showing a confident result/transformation, then explains how
+   • "CURIOSITY_LOOP" — opens with a question or unexpected statement that makes you keep watching ("You won't believe what this bra did...")
+   • "SOCIAL_PROOF" — opens with citing other people's reactions ("Everyone is asking about this...")
+   • "DIRECT_CONFESSION" — opens with a personal vulnerable admission ("OK I never spend $X on bras but...")
+   • "COMPARISON_HOOK" — opens by comparing to a known brand/product ("This is literally Skims for $20...")
+   • "DEMO_FIRST" — opens by physically demonstrating the product, talking later
+   • "ENERGY_REACTION" — opens with raw emotional reaction ("OH MY GOD you guys—")
+   • "STORY_HOOK" — opens with a mini-story ("So I bought 3 sizes because...")
+
+B. narrative_structure — Which structural template does this reference follow? Pick ONE:
+   • "PROBLEM_SOLUTION_DEMO" — pain point → product reveal → demo → CTA
+   • "AB_REVEAL" — alternating talking-head and product-shot cuts (the typical "outfit reveal" structure)
+   • "ONE_TAKE_WALKTHROUGH" — single continuous shot, talks while moving/showing
+   • "GRWM_STYLE" — gets-ready-with-me, multitasking while reviewing
+   • "TRY_ON_HAUL" — tries multiple variations in sequence
+   • "SIDE_BY_SIDE_COMPARISON" — explicitly compares to another product/brand
+   • "DEMO_THEN_TALK" — silent product demo first, then sits down to talk about it
+   • "TESTIMONIAL_MONOLOGUE" — straight to camera, single setup, talking the whole time
+   • "Q&A_SELF_ANSWER" — poses questions to herself and answers
+   • "THREE_REASONS" — explicitly lists "1st thing... 2nd... 3rd..."
+
+C. tone_register — What's the speaking energy? Pick ONE:
+   • "EXCITED_BEST_FRIEND" — high energy, fast, "OMG you guys"
+   • "CALM_REVIEWER" — measured, slower, expert tone
+   • "SASSY_CONFIDENT" — bold, slightly cheeky, holding her own
+   • "GEN_Z_CASUAL" — laid back, "literally" "deadass" "no cap" lingo
+   • "SOFT_INTIMATE" — quiet, ASMR-like, like sharing in a bedroom
+   • "VULNERABLE_AUTHENTIC" — slightly hesitant, real, like talking to a therapist
+   • "DEADPAN_FUNNY" — flat delivery for comedic effect
+   • "TEACHER_EDUCATIONAL" — explanatory, "let me show you"
+
+D. unique_creative_signature — Free-text 1-3 sentences. What is the ONE specific creative element that makes THIS reference video memorable and would be a shame to lose if we generated a generic version? Examples:
+   • "She films herself in front of an open closet, pulling other failed bras out of a pile to compare against the new one"
+   • "She uses a slow-mo hair flip transition between Look A and Look B"
+   • "She does the entire video while folding laundry — never looks at camera until the last 2 seconds"
+   • "She talks to her reflection in the mirror, never to the camera directly"
+   • "She uses a self-shot bathroom mirror angle for half the video"
+   This field captures things that TASKs A/B/C above might miss.
+
+E. key_phrases — Extract 2-3 specific phrases the creator says that are catchy/memorable hook lines (verbatim from transcript). These should be the lines that, if removed, would make the video lose its punch. Pass 2 should preserve at least one of these in the final script.
+
+CRITICAL: Do NOT default to generic answers. The whole point is capturing what's UNIQUE about THIS video. If you find yourself reaching for the most common option in each list, look harder.
+
 Return ONLY this valid JSON, no markdown fences, no explanation:
 {
   "video_analysis": {
@@ -921,6 +978,13 @@ Return ONLY this valid JSON, no markdown fences, no explanation:
     "fabric_visual": "",
     "color": "",
     "distinguishing_details": ""
+  },
+  "narrative_dna": {
+    "hook_type": "",
+    "narrative_structure": "",
+    "tone_register": "",
+    "unique_creative_signature": "",
+    "key_phrases": ["", "", ""]
   },
   "key_segment_start_seconds": 0,
   "key_segment_end_seconds": 15,
@@ -1023,38 +1087,90 @@ OUTFIT — two looks of THE SAME PERSON (cardigan on/off only):
 [SHOT SEQUENCE]
 Every shot = a real person doing something. No static images. No product-on-white-background shots.
 
-WORD BUDGET: total dialogue ≤ ${Math.round(targetDuration * 2.8)} words. Distribute the compressed_script across these shots, never exceeding the per-shot time × 2.8 words limit. Leave the last 1-2 seconds SILENT or with a gesture/smile.
+WORD BUDGET: total dialogue ≤ ${Math.round(targetDuration * 2.8)} words. Distribute the compressed_script across shots, never exceeding the per-shot time × 2.8 words limit. Leave the last 1-2 seconds SILENT or with a gesture/smile.
 
 ACTION SAFETY — Seedance has known weaknesses with complex 3D intersections. NEVER write actions that involve:
-  • Fingers slipping UNDER tight clothing (e.g. "slides finger under the underwire", "tucks fingers behind the band") — causes hand-into-fabric distortion
-  • Multi-finger pinching, lifting, or pulling of THIN/DELICATE product parts (straps, lace edges, decorative trim) — causes melted/distorted fingers and floating fabric
-  • Hands clipping THROUGH straps or band — causes melted/floating finger artifacts
-  • Hair flowing over hands or product — causes hair-fabric merging
-ALWAYS prefer SURFACE-ONLY interactions on LARGE flat areas of the product:
-  ✅ "she traces the OUTSIDE of the underwire channel with her fingertip" (single finger, on top of fabric)
-  ✅ "she runs her palm flat along the band, on top of the fabric" (whole palm, surface only)
-  ✅ "she rests her hand flat on the upper chest / collarbone" (no contact with product edges)
-  ✅ "she turns sideways showing the silhouette" (no hand-product interaction)
-  ✅ "she gestures to the cup with an open palm" (open hand, no pinching)
-  ❌ "she slides a finger under the underwire" / "tucks fingers behind the strap"
-  ❌ "she pinches/lifts/pulls the strap between two fingers" (multi-finger on thin part)
-  ❌ "she pulls the band away from her torso" (deformation of product)
+  • Fingers slipping UNDER tight clothing — causes hand-into-fabric distortion
+  • Multi-finger pinching, lifting, or pulling of THIN parts (straps, lace edges) — causes melted/distorted fingers
+  • Hands clipping THROUGH straps or band — melted/floating finger artifacts
+  • Hair flowing over hands or product — hair-fabric merging
+ALWAYS prefer SURFACE-ONLY interactions on LARGE flat areas: single finger or open palm on band/cup surface; turning the body to show silhouette; resting hand flat on collarbone.
 
-ANTI-LOOPING RULE — Seedance has a documented "boomerang effect": when two consecutive shots in the same outfit show similar hand-on-body actions for 8+ seconds total, Seedance falls back to looping/reversing the same animation segment (looks like a stuttering GIF). To prevent this:
-  • Use the A-B-A-B alternating cut structure: LOOK A (talk) → LOOK B (demo) → LOOK A (talk) → LOOK B (demo)
-  • OR introduce a clear PHYSICAL DISPLACEMENT between consecutive LOOK B shots: turn the body, walk a step, change angle, switch hand position completely
-  • NEVER place two consecutive LOOK B shots that both involve "hand-on-chest-area" actions
-  • Each LOOK B segment should be ≤ 5 seconds at most — if longer demo time is needed, break with a LOOK A cutaway
+ANTI-LOOPING RULE — When you have two consecutive shots in the same outfit setup, vary the camera angle (side profile, back 3/4 turn, step closer, walk to side). NEVER use horizontal mirror flip to fake a "different angle" — that breaks spatial logic.
 
-[0–4s] LOOK A. Medium close-up — she faces camera straight-on (camera at eye level, presenter facing forward). Talks fast. Says: "<part 1 of compressed_script>"
-[4–8s] LOOK B. FRONT-FACING shot of presenter (camera is directly in front, she faces camera). Wears only the product. SURFACE-ONLY action (single finger or open palm on large flat areas — see ACTION SAFETY above) — <e.g. "she runs her palm flat along the band on top of the fabric", "she rests her hand flat on her collarbone gesturing to the neckline">. Fast voiceover: "<part 2 of compressed_script>"
-[8–11s] LOOK A. Cuts back to the cardigan look, talking head, FRONT-FACING. Says: "<part 3 of compressed_script>"
-[11–${targetDuration}s] LOOK B. CRITICAL — this shot must be a GENUINELY DIFFERENT camera angle, NOT a mirror flip of the previous LOOK B. Pick ONE specific framing from this list:
-   • OPTION 1 — SIDE PROFILE: presenter physically rotates her body 90° to her own right (camera stays in same place); we now see her left side profile silhouette of the bra cup and band line. Hair stays on the same side. Background unchanged.
-   • OPTION 2 — BACK-TURNED 3/4: presenter physically rotates her body 135° (back to camera but slightly angled), showing the back of the bra with the hook-and-eye closure. She glances back over her right shoulder smiling at the end. Hair clearly drapes down her back.
-   • OPTION 3 — STEP CLOSER: presenter takes one step toward camera (camera does NOT move). Frame becomes a tight chest-up close-up of the bra fabric texture. She looks down at the bra then back up at camera.
-DO NOT achieve "different angle" by horizontally mirroring the [4-8s] frame — that breaks spatial logic (background lamps swap sides, hair part flips). The camera stays fixed; the presenter actually moves her body in 3D space.
-SURFACE-ONLY interaction (NO pinching, lifting, or pulling of thin product parts). Voiceover: "<SHORT closing — max 6 words. Must finish with 1s to spare.>"
+NARRATIVE STRUCTURE — CRITICAL: This is the most important block. Use the narrative_structure value from PASS 1's narrative_dna to choose how the shots are arranged. The structure should match what made the reference video memorable, NOT a generic A-B-A-B template.
+
+PASS 1 IDENTIFIED:
+  • hook_type: <copy from pass1Result.narrative_dna.hook_type>
+  • narrative_structure: <copy from pass1Result.narrative_dna.narrative_structure>
+  • tone_register: <copy from pass1Result.narrative_dna.tone_register>
+  • unique_creative_signature: <copy from pass1Result.narrative_dna.unique_creative_signature>
+
+WRITE THE SHOT SEQUENCE FOLLOWING THE narrative_structure (pick the matching template below; if none matches exactly, adapt the closest one):
+
+▶ If narrative_structure = "PROBLEM_SOLUTION_DEMO":
+  [0-4s] LOOK A. She rants about the problem with a frustrated/exasperated facial expression. NO product visible yet.
+  [4-7s] LOOK A. Picks up / reveals the product, expression shifts to relief or excitement. Brief talking-head moment.
+  [7-12s] LOOK B. SURFACE-ONLY demo: she shows fit/silhouette, palm flat on band, turns sideways. Voiceover continues.
+  [12-${targetDuration}s] LOOK A or LOOK B. Confident look at camera, smiles, NO ad-libbed CTA — silent satisfied look.
+
+▶ If narrative_structure = "AB_REVEAL":
+  [0-4s] LOOK A. Talking head, faces camera, opens with hook. Front-facing.
+  [4-8s] LOOK B. FRONT-FACING product shot, surface-only action.
+  [8-11s] LOOK A. Cut back to cardigan, talking head, FRONT-FACING.
+  [11-${targetDuration}s] LOOK B. PHYSICALLY DIFFERENT angle (side profile / back 3/4 / step closer — pick ONE; never mirror flip).
+
+▶ If narrative_structure = "ONE_TAKE_WALKTHROUGH":
+  Single continuous shot, NO cuts. Camera follows her as she walks slowly across a room (e.g. from bed to mirror, or along a hallway).
+  Outfit: cardigan stays ON the entire video; bra is glimpsed through open cardigan, never fully bare.
+  She talks the whole time, glancing at camera then around the room. ONE camera setup, no location change.
+  Last 2s: she stops, looks at camera, smiles silently.
+
+▶ If narrative_structure = "GRWM_STYLE":
+  [0-4s] LOOK A. She's doing something else (brushing hair, applying lip balm, making her bed) WHILE talking — multitasking, not looking at camera.
+  [4-9s] LOOK A or LOOK B. Continues the activity, glances at camera mid-task to deliver the key product line.
+  [9-13s] LOOK B. Pauses the activity, focuses on showing the product fit (surface-only).
+  [13-${targetDuration}s] LOOK A. Returns to the original activity, smiles, video ends mid-task feeling natural.
+
+▶ If narrative_structure = "TRY_ON_HAUL":
+  [0-3s] LOOK A. Holds up the bra, says one fast intro line.
+  [3-9s] LOOK B. Shows the product worn — front view, then turns to side. Two distinct phases of the same wearing.
+  [9-13s] LOOK B. Different angle (back 3/4 or step closer) — emphasizes a different feature.
+  [13-${targetDuration}s] LOOK A. Confident result shot, looks at camera, smiles.
+
+▶ If narrative_structure = "SIDE_BY_SIDE_COMPARISON":
+  [0-4s] LOOK A. Holds up the comparison product (e.g. a typical bra) in one hand and OUR product in the other. Talks about the difference.
+  [4-9s] LOOK B. Shows OUR product worn — emphasizes the contrast feature (e.g. seamless edges if comparison was lacy).
+  [9-13s] LOOK A. Returns to the comparison product reference (verbal, e.g. "vs. those").
+  [13-${targetDuration}s] LOOK B. Final confident shot with our product, smile.
+
+▶ If narrative_structure = "DEMO_THEN_TALK":
+  [0-7s] LOOK B. Pure visual demo — NO talking. She walks into frame wearing the bra (with cardigan over it), turns around showing different angles. Quiet ambient room tone.
+  [7-${targetDuration}s] LOOK A. Sits down or stops moving. NOW starts talking, faces camera, delivers the entire script in this one continuous talking-head shot.
+
+▶ If narrative_structure = "TESTIMONIAL_MONOLOGUE":
+  Single LOOK A shot, ONE camera setup, ENTIRE video she's talking to camera. No cuts to LOOK B at all.
+  Camera framing: medium close-up, eye level. She's wearing the cardigan over the bra throughout. Bra straps and partial cup visible through the open cardigan but never fully revealed.
+  She uses hand gestures and slight body shifts for visual variety, but no edit cuts.
+  Last 2s: she nods, smiles, falls silent.
+
+▶ If narrative_structure = "Q&A_SELF_ANSWER":
+  [0-3s] LOOK A. Asks a question to camera (e.g. "Why do I keep buying this bra?").
+  [3-8s] LOOK A. Answers with the first reason while gesturing.
+  [8-12s] LOOK B. Shows the product proving the answer.
+  [12-${targetDuration}s] LOOK A. Final smiling beat.
+
+▶ If narrative_structure = "THREE_REASONS":
+  [0-3s] LOOK A. "Three reasons I love this bra:" — sets up the structure.
+  [3-7s] LOOK A or LOOK B. "First..." — reason 1.
+  [7-11s] LOOK B. "Second..." — reason 2 (shown via product demo).
+  [11-${targetDuration}s] LOOK A or LOOK B. "Third..." — reason 3, ends with smile.
+
+After picking the matching template, REPLACE every <part X of compressed_script> placeholder with actual lines from compressed_script. Distribute the script naturally according to the template's pacing.
+
+PRESERVE THE UNIQUE SIGNATURE: If pass1Result.narrative_dna.unique_creative_signature describes a specific creative element (e.g. "she folds laundry while talking"), incorporate it into the relevant shot — even if it slightly modifies the template above. The unique signature is what makes this video different from a generic AI-generated one.
+
+PRESERVE KEY PHRASES: At least ONE of pass1Result.narrative_dna.key_phrases must appear verbatim in the SHOT SEQUENCE dialogue.
 
 [STYLE]
 Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.
@@ -1071,9 +1187,16 @@ Expression: warm, fast-talking, spontaneous. Like sharing a secret. NOT posed or
 Body language: loose, continuous, slightly imprecise movements. No theatrical pauses.
 
 [SPEAKING STYLE]
-FAST pace throughout — excited, can't wait to tell you. Barely pauses between sentences.
-Natural speech: brief "um" or "like" from transcript where they appeared.
-One or two interjections: "Honestly", "Oh my god", "Seriously" — only where natural.
+TONE: Match pass1Result.narrative_dna.tone_register. Pick the matching delivery style:
+  • EXCITED_BEST_FRIEND — high-energy, fast, exclamations like "OMG you guys", barely pauses, voice goes up at end of sentences
+  • CALM_REVIEWER — measured medium pace, lower-pitched, expert tone, slight pauses for emphasis
+  • SASSY_CONFIDENT — moderate pace with attitude, slight smirk in voice, occasional eye-roll inflection
+  • GEN_Z_CASUAL — laid-back medium-slow pace, drops "literally", "deadass", "no cap", trailing off at end of phrases
+  • SOFT_INTIMATE — quiet, slower, breathy ASMR-like quality, like sharing in bedroom
+  • VULNERABLE_AUTHENTIC — slightly hesitant, real, occasional pauses to find words, like being honest
+  • DEADPAN_FUNNY — flat affect with comedic timing, slight pause before punch lines
+  • TEACHER_EDUCATIONAL — clear articulation, slight pauses to let info land, "let me show you" energy
+Natural speech patterns appropriate to the tone.
 NOT a broadcaster voice.
 
 [AVOID]
@@ -1194,7 +1317,20 @@ IMPORTANT RULES:
 - The seedance_prompt MUST follow the FIXED STRUCTURE above exactly. Replace every <...> placeholder with concrete content based on the PASS 1 analysis and the product images shown.
 - Copy product_visual_features values VERBATIM into the [PRODUCT VISUAL ANCHOR] block. Do not paraphrase.
 - Use the compressed_script from PASS 1 as the source of all spoken dialogue — distribute it across SHOT SEQUENCE lines, preserving exact wording.
-- COLOR LOCK: Pass 1 chose dominant_color = "${pass1Result.dominant_color || 'unspecified'}". Replace EVERY occurrence of <DOMINANT_COLOR> in the template with this exact color name. Mention this color at least 3 times across the whole prompt: in [OPENING LINE], [OUTFIT], and [SHOT SEQUENCE]. Never write "any color" or "<color1> or <color2>" — only this single color.${variantRecipe ? `
+- COLOR LOCK: Pass 1 chose dominant_color = "${pass1Result.dominant_color || 'unspecified'}". Replace EVERY occurrence of <DOMINANT_COLOR> in the template with this exact color name. Mention this color at least 3 times across the whole prompt: in [OPENING LINE], [OUTFIT], and [SHOT SEQUENCE]. Never write "any color" or "<color1> or <color2>" — only this single color.
+- NARRATIVE DNA LOCK (CRITICAL — this is what prevents templated/repetitive output):
+  PASS 1 extracted narrative_dna:
+    • hook_type: ${pass1Result.narrative_dna?.hook_type || 'unspecified'}
+    • narrative_structure: ${pass1Result.narrative_dna?.narrative_structure || 'unspecified'}
+    • tone_register: ${pass1Result.narrative_dna?.tone_register || 'unspecified'}
+    • unique_creative_signature: ${pass1Result.narrative_dna?.unique_creative_signature || 'unspecified'}
+    • key_phrases: ${JSON.stringify(pass1Result.narrative_dna?.key_phrases || [])}
+  REQUIREMENTS:
+  (1) The SHOT SEQUENCE MUST follow the structural template that matches narrative_structure (see SHOT SEQUENCE block for the 10 templates). Do NOT default to "AB_REVEAL" if narrative_structure is something else.
+  (2) The SPEAKING STYLE MUST match tone_register (see SPEAKING STYLE block for the 8 tones). Do NOT default to "EXCITED_BEST_FRIEND" if tone_register is something else.
+  (3) The unique_creative_signature MUST be reflected in the SHOT SEQUENCE — modify shot descriptions to incorporate this specific creative element (e.g. if signature says "she's folding laundry", at least one shot must show this).
+  (4) At least ONE key_phrase MUST appear verbatim in the SHOT SEQUENCE dialogue.
+  This is what makes the generated video DIFFERENT from a generic AI template, even when other variants reuse the same reference. Do NOT skip this.${variantRecipe ? `
 - VARIANT RECIPE LOCK (this run is variant "${variantRecipe.label}" — used to diversify outputs from the same reference video for TikTok anti-duplicate):
   • PRESENTER block MUST describe exactly: ${variantRecipe.presenter}
   • [STYLE] background MUST be: ${variantRecipe.scene}

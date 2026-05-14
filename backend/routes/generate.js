@@ -9,7 +9,8 @@ import axios from 'axios'
 import { analyzeAndGeneratePrompt, SEEDANCE_MANDATORY_BLOCKS, VARIANT_RECIPES } from '../services/gemini.js'
 import { validateGeminiOutput, formatValidationReport } from '../services/prompt-validator.js'
 import { reviewPrompt, reviseGeminiOutput, formatReviewReport, clearImageCache } from '../services/gemini-review.js'
-import { saveJob, getJob, listJobs, countJobs, saveVideo } from '../services/db.js'
+import { saveJob, getJob, listJobs, countJobs, saveVideo, updateVideoJudge, updateVideoDiffJudge } from '../services/db.js'
+import { judgeGeneratedVideo, judgeNarrativeDifferentiation } from '../services/gemini-video-judge.js'
 import { uploadImagesToKie, uploadFileToKie } from '../services/kieai-upload.js'
 import { createBatchTasks, getTaskStatus, parseTaskResult } from '../services/kieai.js'
 import { getTikTokPlaybackUrl } from '../services/snaptik.js'
@@ -554,11 +555,51 @@ router.get('/status/:jobId', async (req, res) => {
               reviewScore: job.reviewReport?.score,
               reviewPass: job.reviewReport?.pass,
               reviewIssues: job.reviewReport?.issues,
+              narrativeDna: job.geminiResult?.narrative_dna,
             })
           } catch (e) {
             console.warn(`[${jobId}] 保存 video 表失败（不阻塞）: ${e.message}`)
           }
         }
+        // 异步评分：让 Gemini 看完生成的视频后给出多维度评分（不阻塞前端响应）
+        // 用 setImmediate 保证主流程立即结束
+        setImmediate(async () => {
+          for (const v of videos) {
+            try {
+              console.log(`[${jobId}] 🔍 调用 Gemini 评分视频 ${v.taskId}...`)
+              const judge = await judgeGeneratedVideo({
+                generatedVideoUrl: v.videoUrl,
+                productInfo: job.geminiResult?.product_visual_features,
+                prompt: job.geminiResult?.seedance_prompt,
+              })
+              if (judge) {
+                updateVideoJudge(v.taskId, judge)
+                console.log(`[${jobId}] ✅ 视频评分完成：${judge.overall}/10 — ${judge.verdict}`)
+              }
+              // 如果有标杆参考视频，再做差异化评分
+              if (job.referenceVideoUrl) {
+                console.log(`[${jobId}] 🔍 与标杆视频对比差异化...`)
+                // 转换 TikTok URL → 直链：从 backend 直接拿不到，传 raw URL 给 Gemini 也能下载
+                // 但 Gemini 对 TikTok URL 的 inline 不可访问，所以这里跳过：未来如果需要可加 snaptik 解析
+                // 暂时只对比 video URL，如果是 TikTok URL 会失败但不阻塞
+                try {
+                  const diff = await judgeNarrativeDifferentiation({
+                    generatedVideoUrl: v.videoUrl,
+                    benchmarkVideoUrl: job.referenceVideoUrl,
+                  })
+                  if (diff) {
+                    updateVideoDiffJudge(v.taskId, diff)
+                    console.log(`[${jobId}] ✅ 差异化评分：${diff.overall_differentiation}/10 — ${diff.verdict}`)
+                  }
+                } catch (e) {
+                  console.warn(`[${jobId}] 差异化评分失败（跳过）: ${e.message}`)
+                }
+              }
+            } catch (e) {
+              console.warn(`[${jobId}] 视频评分失败（跳过）: ${e.message}`)
+            }
+          }
+        })
       } else {
         console.error(`[${jobId}] ❌ 所有任务均失败`)
       }

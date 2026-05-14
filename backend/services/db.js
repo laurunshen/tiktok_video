@@ -150,6 +150,15 @@ db.exec(`
 
 // 平滑升级：旧库可能没有新字段，加上忽略错误
 try { db.exec('ALTER TABLE jobs ADD COLUMN variant_seed INTEGER') } catch {}
+// 视频后评分（Gemini 看完生成视频后给出的多维度评分）
+try { db.exec('ALTER TABLE videos ADD COLUMN video_judge_overall REAL') } catch {}
+try { db.exec('ALTER TABLE videos ADD COLUMN video_judge_scores TEXT') } catch {}    // JSON of per-dim scores
+try { db.exec('ALTER TABLE videos ADD COLUMN video_judge_issues TEXT') } catch {}    // JSON array
+try { db.exec('ALTER TABLE videos ADD COLUMN video_judge_verdict TEXT') } catch {}
+try { db.exec('ALTER TABLE videos ADD COLUMN diff_judge_overall REAL') } catch {}    // 与标杆视频的差异化评分
+try { db.exec('ALTER TABLE videos ADD COLUMN diff_judge_scores TEXT') } catch {}
+try { db.exec('ALTER TABLE videos ADD COLUMN diff_judge_verdict TEXT') } catch {}
+try { db.exec('ALTER TABLE videos ADD COLUMN narrative_dna TEXT') } catch {}        // Pass 1 提取的 narrative_dna JSON
 
 console.log(`[DB] SQLite 已初始化: ${DB_PATH}`)
 
@@ -238,11 +247,13 @@ export function saveVideo(video) {
       video_id, job_id, video_url, prompt, compressed_script,
       product_visual_features, selected_image_indices, selected_image_urls, dominant_color,
       review_score, review_pass, review_issues, revision_count,
+      narrative_dna,
       created_at
     ) VALUES (
       @video_id, @job_id, @video_url, @prompt, @compressed_script,
       @product_visual_features, @selected_image_indices, @selected_image_urls, @dominant_color,
       @review_score, @review_pass, @review_issues, @revision_count,
+      @narrative_dna,
       @created_at
     )
   `)
@@ -261,8 +272,46 @@ export function saveVideo(video) {
     review_pass: video.reviewPass == null ? null : (video.reviewPass ? 1 : 0),
     review_issues: video.reviewIssues ? JSON.stringify(video.reviewIssues) : null,
     revision_count: video.revisionCount ?? 0,
+    narrative_dna: video.narrativeDna ? JSON.stringify(video.narrativeDna) : null,
     created_at: Date.now(),
   })
+}
+
+// 视频生成完成后，更新 video judge 评分（异步调用 Gemini 后写入）
+export function updateVideoJudge(videoId, judge) {
+  if (!judge) return
+  db.prepare(`UPDATE videos SET
+    video_judge_overall = ?, video_judge_scores = ?, video_judge_issues = ?, video_judge_verdict = ?
+    WHERE video_id = ?`).run(
+    judge.overall ?? null,
+    judge.scores ? JSON.stringify(judge.scores) : null,
+    judge.top_issues ? JSON.stringify(judge.top_issues) : null,
+    judge.verdict ?? null,
+    videoId,
+  )
+}
+
+// 与标杆视频的差异化评分
+export function updateVideoDiffJudge(videoId, diffJudge) {
+  if (!diffJudge) return
+  db.prepare(`UPDATE videos SET
+    diff_judge_overall = ?, diff_judge_scores = ?, diff_judge_verdict = ?
+    WHERE video_id = ?`).run(
+    diffJudge.overall_differentiation ?? null,
+    diffJudge.scores ? JSON.stringify(diffJudge.scores) : null,
+    diffJudge.verdict ?? null,
+    videoId,
+  )
+}
+
+// 直接读取一条视频（含所有 judge 字段）
+export function getVideo(videoId) {
+  return db.prepare('SELECT * FROM videos WHERE video_id = ?').get(videoId)
+}
+
+// 读一个 job 的所有 videos
+export function getVideosByJob(jobId) {
+  return db.prepare('SELECT * FROM videos WHERE job_id = ? ORDER BY created_at').all(jobId)
 }
 
 // ===== Product 缓存 =====
