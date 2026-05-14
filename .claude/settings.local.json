@@ -60,7 +60,12 @@
       "Bash(git commit -q -m ' *)",
       "Bash(node --check services/gemini.js)",
       "Bash(git commit *)",
-      "Bash(ffprobe -version)"
+      "Bash(ffprobe -version)",
+      "Bash(kill 24984)",
+      "Bash(echo \"ADC quota project: $\\(gcloud auth application-default print-access-token --verbosity=info 2>&1)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('quota_project_id:', d.get\\('quota_project_id', '<未设置>'\\)\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('quota_project_id:', d.get\\('quota_project_id', '<仍未设置>'\\)\\)\")",
+      "Bash(chmod +x /tmp/poll_job.sh)"
     ]
   }
 }

@@ -788,7 +788,7 @@ Required fields (use null if not visible):
 - straps: width, adjustability, color, racerback / standard / convertible
 - closure: hook-and-eye rows count / front-clasp / pullover
 - fabric_visual: how the fabric looks on screen (e.g. "matte microfiber, slight sheen", "stretch lace with floral pattern", "ribbed athletic mesh")
-- color: exact color name as shown
+- color: PICK EXACTLY ONE color name. The product listing may offer multiple variants (Beige / Black / White / Nude Pink etc.) but the video can only show ONE. Look at the product images and identify which color is featured in the HERO/FRONT shots — output ONLY that single color name. NEVER output multiple colors separated by commas/slashes (e.g. "Beige, Black" is WRONG — Seedance will randomly mix). The color you write here is what the video will render.
 - distinguishing_details: anything that makes this product unique (bow, contrast trim, decorative panels, etc.)
 
 TASK 2c - Identify the BEST 15-second segment of the reference video.
@@ -936,10 +936,16 @@ ALWAYS prefer SURFACE-ONLY interactions:
   ✅ "she turns sideways showing the silhouette"
   ❌ "she slides a finger under the underwire" / "tucks fingers behind the strap"
 
-[0–Xs] LOOK A. Medium close-up — she faces camera, talks fast. Says: "<part 1 of compressed_script>"
-[Xs–Ys] LOOK B. She demonstrates the product on her body — <specific SURFACE-ONLY action: e.g. "she runs her palm flat along the band on top of the fabric", "she turns sideways showing the silhouette", "she pinches the strap between two fingers and lifts gently">. Fast voiceover: "<part 2 of compressed_script>"
-[Ys–Zs] LOOK B close-up. Hands demonstrate a specific product component using SURFACE-ONLY interaction — <e.g. "she pinches and stretches the bra strap showing elasticity and snap-back", "she traces the OUTSIDE of the seamless edge along her ribcage with one fingertip">. Action is on the actual product surface, NOT under it. Voiceover: "<part 3 of compressed_script>"
-[Zs–${targetDuration}s] LOOK A. She smiles at camera. Says quickly: "<SHORT closing — max 6 words. Must finish with 1s to spare.>"
+ANTI-LOOPING RULE — Seedance has a documented "boomerang effect": when two consecutive shots in the same outfit show similar hand-on-body actions for 8+ seconds total, Seedance falls back to looping/reversing the same animation segment (looks like a stuttering GIF). To prevent this:
+  • Use the A-B-A-B alternating cut structure: LOOK A (talk) → LOOK B (demo) → LOOK A (talk) → LOOK B (demo)
+  • OR introduce a clear PHYSICAL DISPLACEMENT between consecutive LOOK B shots: turn the body, walk a step, change angle, switch hand position completely
+  • NEVER place two consecutive LOOK B shots that both involve "hand-on-chest-area" actions
+  • Each LOOK B segment should be ≤ 5 seconds at most — if longer demo time is needed, break with a LOOK A cutaway
+
+[0–4s] LOOK A. Medium close-up — she faces camera, talks fast. Says: "<part 1 of compressed_script>"
+[4–8s] LOOK B. Wears only the product. SURFACE-ONLY action — <e.g. "she turns sideways showing the silhouette", "she runs her palm flat along the band on top of the fabric", "she pinches the strap between two fingers and lifts gently">. Fast voiceover: "<part 2 of compressed_script>"
+[8–11s] LOOK A. Cuts back to the cardigan look, talking head. Says: "<part 3 of compressed_script>"
+[11–${targetDuration}s] LOOK B. PHYSICALLY DIFFERENT angle/position from the [4-8s] LOOK B (e.g. if [4-8s] was front-facing palm-on-band, this one is back-turned showing the seamless back design / strap pull). SURFACE-ONLY interaction. Voiceover: "<SHORT closing — max 6 words. Must finish with 1s to spare.>"
 
 [STYLE]
 Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.

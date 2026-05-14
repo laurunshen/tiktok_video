@@ -93,6 +93,21 @@ export function validateGeminiOutput(geminiResult, { targetDuration, finalRefere
     issues.push({ severity: 'critical', field: 'seedance_prompt', problem: '缺少 [SHOT SEQUENCE] 块' })
   }
 
+  // 8a. color 字段必须是单个颜色，不能是 "Beige, Black" 这种多色组合
+  // （Seedance 看到多色会随机抓一个，导致颜色不可控）
+  const colorVal = (features.color || '').trim()
+  if (colorVal) {
+    // 检测多个用 / , 或 " or " " and " 分隔的颜色
+    const multiColorPattern = /[,/]|\bor\b|\band\b/i
+    if (multiColorPattern.test(colorVal)) {
+      issues.push({
+        severity: 'critical',
+        field: 'product_visual_features.color',
+        problem: `color 字段包含多个颜色 "${colorVal}" — Seedance 会随机抓一个，导致颜色不可控。Pass 1 必须从产品图的 hero 镜头里挑一个具体颜色。`,
+      })
+    }
+  }
+
   // 8. 禁止 if/then 元逻辑泄漏到 prompt（Seedance 不解析条件，会把两个分支的关键词混在一起）
   const conditionalPatterns = [
     /\bif\s+edge_finish\b/i,
