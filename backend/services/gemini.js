@@ -949,14 +949,18 @@ WORD BUDGET: total dialogue ≤ ${Math.round(targetDuration * 2.8)} words. Distr
 
 ACTION SAFETY — Seedance has known weaknesses with complex 3D intersections. NEVER write actions that involve:
   • Fingers slipping UNDER tight clothing (e.g. "slides finger under the underwire", "tucks fingers behind the band") — causes hand-into-fabric distortion
+  • Multi-finger pinching, lifting, or pulling of THIN/DELICATE product parts (straps, lace edges, decorative trim) — causes melted/distorted fingers and floating fabric
   • Hands clipping THROUGH straps or band — causes melted/floating finger artifacts
   • Hair flowing over hands or product — causes hair-fabric merging
-ALWAYS prefer SURFACE-ONLY interactions:
-  ✅ "she traces the OUTSIDE of the underwire channel with her fingertip"
-  ✅ "she runs her palm flat along the band, on top of the fabric"
-  ✅ "she pinches the strap between two fingers and gently lifts it"
-  ✅ "she turns sideways showing the silhouette"
+ALWAYS prefer SURFACE-ONLY interactions on LARGE flat areas of the product:
+  ✅ "she traces the OUTSIDE of the underwire channel with her fingertip" (single finger, on top of fabric)
+  ✅ "she runs her palm flat along the band, on top of the fabric" (whole palm, surface only)
+  ✅ "she rests her hand flat on the upper chest / collarbone" (no contact with product edges)
+  ✅ "she turns sideways showing the silhouette" (no hand-product interaction)
+  ✅ "she gestures to the cup with an open palm" (open hand, no pinching)
   ❌ "she slides a finger under the underwire" / "tucks fingers behind the strap"
+  ❌ "she pinches/lifts/pulls the strap between two fingers" (multi-finger on thin part)
+  ❌ "she pulls the band away from her torso" (deformation of product)
 
 ANTI-LOOPING RULE — Seedance has a documented "boomerang effect": when two consecutive shots in the same outfit show similar hand-on-body actions for 8+ seconds total, Seedance falls back to looping/reversing the same animation segment (looks like a stuttering GIF). To prevent this:
   • Use the A-B-A-B alternating cut structure: LOOK A (talk) → LOOK B (demo) → LOOK A (talk) → LOOK B (demo)
@@ -965,9 +969,9 @@ ANTI-LOOPING RULE — Seedance has a documented "boomerang effect": when two con
   • Each LOOK B segment should be ≤ 5 seconds at most — if longer demo time is needed, break with a LOOK A cutaway
 
 [0–4s] LOOK A. Medium close-up — she faces camera, talks fast. Says: "<part 1 of compressed_script>"
-[4–8s] LOOK B. Wears only the product. SURFACE-ONLY action — <e.g. "she turns sideways showing the silhouette", "she runs her palm flat along the band on top of the fabric", "she pinches the strap between two fingers and lifts gently">. Fast voiceover: "<part 2 of compressed_script>"
+[4–8s] LOOK B. Wears only the product. SURFACE-ONLY action (single finger or open palm on large flat areas — see ACTION SAFETY above) — <e.g. "she turns sideways showing the silhouette", "she runs her palm flat along the band on top of the fabric", "she rests her hand flat on her collarbone gesturing to the neckline">. Fast voiceover: "<part 2 of compressed_script>"
 [8–11s] LOOK A. Cuts back to the cardigan look, talking head. Says: "<part 3 of compressed_script>"
-[11–${targetDuration}s] LOOK B. PHYSICALLY DIFFERENT angle/position from the [4-8s] LOOK B (e.g. if [4-8s] was front-facing palm-on-band, this one is back-turned showing the seamless back design / strap pull). SURFACE-ONLY interaction. Voiceover: "<SHORT closing — max 6 words. Must finish with 1s to spare.>"
+[11–${targetDuration}s] LOOK B. PHYSICALLY DIFFERENT angle/position from the [4-8s] LOOK B (e.g. if [4-8s] was front-facing palm-on-band, this one is back-turned showing the seamless back, OR a side-angle silhouette shot, OR a slow walk to the side). SURFACE-ONLY interaction (NO pinching, lifting, or pulling of thin product parts). Voiceover: "<SHORT closing — max 6 words. Must finish with 1s to spare.>"
 
 [STYLE]
 Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.
