@@ -121,27 +121,38 @@ ${compressedScript}
 
 === YOUR REVIEW TASKS ===
 
-Check these 4 dimensions and flag any issue you find. Be strict — catch real problems, not nitpicks.
+You are reviewing this prompt before it goes to an EXPENSIVE video generation model (¥12 per video). Your job is to catch issues that will produce a UNUSABLE / SEVERELY DEFECTIVE video. NOT to nitpick.
 
-1. PRODUCT VISUAL ANCHOR ACCURACY
-   - Look at the product images. Compare against the [PRODUCT VISUAL ANCHOR] block in the draft.
-   - Are silhouette / structure / color / construction descriptions actually consistent with what's in the images?
-   - For lingerie: are edge_finish, underwire_profile, fabric_drape correctly identified? (e.g. if images clearly show laser-cut seamless edges, the anchor must say so — not "visible sewn trim")
-   - Flag any inaccurate or generic description that could lead to wrong product rendering.
+ONLY two classes of problems should be flagged "critical":
 
-2. PRESENTER LIKENESS RISK
-   - Read the [PRESENTER] block. Does it describe a generic person (good) or does it copy specific features that look like a real person from a reference video (bad — likeness risk)?
-   - If the description is suspiciously specific (e.g. exact hair texture + skin tone + face shape combo), flag as likeness risk.
+CLASS A — PRODUCT INACCURACY (will produce a video that misrepresents the product)
+   - Compare the product images against the [PRODUCT VISUAL ANCHOR] block.
+   - Flag CRITICAL only if the prompt describes the product DIFFERENTLY from what the images clearly show. Examples:
+     ❌ Anchor says "laser-cut seamless edges" but images clearly show stitched hems
+     ❌ Anchor says "wireless" but images clearly show underwire
+     ❌ Anchor says "padded" but images clearly show unlined
+     ❌ Brand name in script does not match brand name visible on product packaging in images
+     ❌ Self-contradicting descriptions in the same anchor (e.g. "deep V plunge" AND "balconette" — these are different garments)
+     ❌ AVOID list bans a feature this product actually has (forces the AI to misrepresent)
+   - DO NOT flag critical for: minor wording choices, generic vs specific phrasing, optional details missing.
 
-3. WORD BUDGET / TIMING
-   - Total dialogue word count across all [SHOT SEQUENCE] lines + compressed_script should be ≤ ${Math.round(targetDuration * 2.8)} words.
-   - Each shot's line should fit within its time window at ~2.8 words/sec.
-   - Flag if total exceeds budget or if any single shot is overloaded.
+CLASS B — SEVERE PHYSICAL HALLUCINATION RISK (will produce visible body/garment distortion)
+   - Flag CRITICAL only for actions/descriptions known to break Seedance:
+     ❌ Long loose hair flowing over the chest where bra/garment is shown
+     ❌ Fingers slipping UNDER tight clothing (bra band, underwire, strap)
+     ❌ Hands clipping THROUGH straps or fabric
+     ❌ Multi-finger interaction with thin/delicate product parts at extreme angles
+   - DO NOT flag critical for: speaking pace too fast, shot length too short, scene description not vivid enough, missing variety.
 
-4. INTERNAL CONSISTENCY
-   - Do the [SHOT SEQUENCE] actions actually demonstrate what the [PRODUCT VISUAL ANCHOR] describes?
-   - Are there contradictions (e.g. anchor says "wireless" but shot description says "shows underwire")?
-   - Is anything missing or vague that would cause the model to hallucinate?
+EVERYTHING ELSE = warning (does NOT block, will not trigger revision):
+   - Word budget overflow (even +20% over) → warning only
+   - Speaking pace 2.8 vs 3.3 words/sec → warning only
+   - Final 1-2s not perfectly silent → warning only
+   - Generic vs specific descriptions → warning only
+   - Likeness concerns (the pipeline already injects FACE & LIKENESS block) → warning only
+   - Missing optional elements (interjections, fillers, etc) → warning only
+
+KEY HEURISTIC: Will this issue produce a video that is UNUSABLE for the merchant? If yes → critical. If it just makes the video slightly less polished → warning.
 
 === OUTPUT FORMAT ===
 
@@ -150,14 +161,14 @@ Return ONLY valid JSON, no markdown:
   "pass": true/false,
   "score": 0-10,
   "issues": [
-    { "severity": "critical|warning", "field": "PRODUCT VISUAL ANCHOR|PRESENTER|SHOT SEQUENCE|...", "problem": "specific issue", "fix": "specific corrective action" }
+    { "severity": "critical|warning", "field": "PRODUCT VISUAL ANCHOR|SHOT SEQUENCE|...", "problem": "specific issue", "fix": "specific corrective action" }
   ],
-  "suggestion": "If pass=false, write a concise instruction (under 200 words) the junior should follow to fix the prompt. If pass=true, write 'No changes needed.'"
+  "suggestion": "If pass=false, write a concise instruction (under 200 words) for the junior to fix CRITICAL issues only. If pass=true, write 'No changes needed.'"
 }
 
 PASS RULE:
-- pass=true ONLY if there are zero "critical" issues. "warning" issues are OK to pass with.
-- score: 10 = perfect, 8-9 = minor warnings, 5-7 = needs work, <5 = severely broken.`,
+- pass=true ONLY if zero "critical" issues. ANY number of "warning" issues is OK to pass.
+- score: 10 = perfect, 8-9 = minor warnings, 5-7 = product accuracy concerns, <5 = severely broken.`,
   })
 
   const response = await genai.models.generateContent({
