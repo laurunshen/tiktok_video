@@ -81,7 +81,8 @@
       "Bash(sqlite3 -header -column data/jobs.db \"SELECT author_username, roi, revenue, source FROM reference_videos WHERE is_benchmark=1 AND product_id='1731302299031802096' ORDER BY roi DESC;\")",
       "Bash(sqlite3 -header -column data/jobs.db \"SELECT source, COUNT\\(*\\) as cnt FROM reference_videos WHERE is_benchmark=1 GROUP BY source;\")",
       "Bash(curl -s \"http://localhost:3001/api/generate/jobs?limit=10\")",
-      "Bash(npx vite *)"
+      "Bash(npx vite *)",
+      "Bash(curl -s 'https://api.kie.ai/api/v1/jobs/recordInfo?taskId=__TRACKED_VAR__' -H 'Authorization: Bearer __CMDSUB_OUTPUT__')"
     ]
   }
 }

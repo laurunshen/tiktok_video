@@ -427,7 +427,7 @@ The product appearing in the video MUST be ${dominantColor} ONLY. Reference imag
         ? rawPrompt.slice(0, lastDashIdx) + '\n\n' + allBlocks + '\n' + rawPrompt.slice(lastDashIdx)
         : rawPrompt + '\n\n' + allBlocks
       geminiResult.seedance_prompt = finalPrompt
-      const blockCount = 7 + (dominantColor ? 1 : 0)  // FACE/REF/ANATOMY/NO-TEXT/NO-IMPROV/BODY/AUDIO + 可选 COLOR LOCK
+      const blockCount = 8 + (dominantColor ? 1 : 0)  // FACE/REF/ANATOMY/NO-TEXT/NO-IMPROV/BODY/CHARACTER/AUDIO + 可选 COLOR LOCK
       console.log(`[${jobId}] 已注入 ${blockCount} 个 MANDATORY 指令块${dominantColor ? `（含 COLOR LOCK = ${dominantColor}）` : ''}，prompt 总长 ${finalPrompt.length} 字符`)
 
       setStep(2, `创建 ${batchCount} 个 Seedance 生成任务`)

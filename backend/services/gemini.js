@@ -44,6 +44,13 @@ The presenter speaks ONLY the exact lines written in [SHOT SEQUENCE]. Do NOT add
 [BODY ATTACHMENT BAN]
 No microphones, lapel mics, clip-on mics, recording devices, name tags, badges, lanyards, brooches, pins, stickers, or unexplained dark spots/objects on the presenter's chest, shoulders, neck, or clothing. The presenter's torso area is CLEAN — only the product and the optional cardigan from [OUTFIT] are present.
 
+[CHARACTER CONSISTENCY — HARD CONSTRAINT, applies across every cut and every shot]
+There is ONLY ONE PERSON in this entire video. The same woman appears in every shot — every LOOK A, every LOOK B, every cut. Across the entire video she has: the same face, same eye shape, same nose, same mouth, same skin tone, same hair color, same hair style, same body proportions, same makeup, same accessories.
+NEVER generate two different-looking women that swap between shots. NEVER change face, makeup, jewelry, hair, or body across cuts.
+If a shot transition would normally cause Seedance to re-sample a new person (e.g. cardigan on/off, different angle, different action), STILL render the SAME woman — only the action/angle/clothing-layer changes.
+The ONLY allowed visual change between shots is: (a) cardigan layer present or removed, (b) body angle/pose, (c) hand positions. EVERYTHING ELSE about the person is locked.
+NEVER add or remove jewelry between shots. NEVER change lipstick color or shade between shots. NEVER change hairstyle between shots.
+
 [AUDIO ENVIRONMENT — HARD CONSTRAINT]
 The output video must be filmed INDOORS in a quiet, residential environment. Audio must be clean and quiet:
   • Setting: indoor bedroom, living room, or bathroom — NEVER outdoors, NEVER on a balcony, NEVER near a window with traffic noise
@@ -947,16 +954,24 @@ Based on product images: <note key visible details — fabric color, texture, st
 [OPENING LINE]
 "Generate a ${targetDuration}-second authentic UGC-style promotional video for <one precise sentence describing the product using PRODUCT VISUAL ANCHOR fields — e.g. 'a deep-V plunge underwire bra with laser-cut flat edges, unlined smooth microfiber cups in warm beige'>."
 
-[PRESENTER]
+[PRESENTER — used IDENTICALLY in both LOOK A and LOOK B]
 Real everyday person, NOT a model or influencer.
-<Fill in: age range, body type, skin tone with natural features — visible pores, possible freckles, natural texture. NOT "flawless".>
+<Fill in: age range, body type, hair color, skin tone with natural features — visible pores, possible freckles, natural texture. NOT "flawless".>
 HAIR — IMPORTANT: hair must be PULLED AWAY from the chest area to keep the bra straps and neckline fully visible. Use one of: high ponytail / low ponytail / messy bun / topknot / hair clipped back / hair tucked securely behind both shoulders. NEVER "long loose hair" / "long hair flowing over chest" / "long hair down" — loose long hair occluding the chest causes severe AI rendering artifacts (flickering between hair and straps, melting hair-on-fabric textures, distorted neckline geometry).
+MAKEUP & ACCESSORIES — to ensure character consistency between shots, the presenter wears:
+  • NO necklaces, NO earrings, NO rings, NO bracelets, NO watches — bare neck and ears throughout
+  • Minimal natural makeup ONLY: clean skin, neutral lip tint (NEVER bold red lipstick, NEVER glossy lipstick), light or no eye makeup
+  • Same hairstyle in every shot — never changes between LOOK A and LOOK B
+  • Same skin tone, same face shape, same body proportions in every frame
 Warm, relaxed energy. Talks fast like she's sharing a secret with a friend.
 
-OUTFIT — two looks, alternating via clean cuts:
-- LOOK A (talking shots): wears an open casual cardigan over the product. Relaxed at-home feel.
-- LOOK B (product demo shots): wears only the product — no outer layer. Shows fit, silhouette, strap placement, fabric on skin.
-Cuts between Look A ↔ Look B are intentional. Do NOT attempt in-frame undressing.
+[CHARACTER CONSISTENCY — HARD CONSTRAINT, applies to every cut]
+The person in LOOK A and the person in LOOK B is THE EXACT SAME WOMAN — same face, same eyes, same nose, same mouth, same skin tone, same hair, same makeup, same body, same age. The ONLY visual difference between LOOK A and LOOK B is whether the open cardigan is worn or not. NEVER generate two different-looking people across the cuts. NEVER change face, hair, makeup, accessories, or body type between shots. If LOOK A shows a woman with a high ponytail and bare neck, LOOK B must show the SAME woman with the SAME high ponytail and SAME bare neck — only the cardigan is removed.
+
+OUTFIT — two looks of THE SAME PERSON, alternating via clean cuts:
+- LOOK A (talking shots): wears the Warm Beige bra WITH an open casual cardigan layered over it. Relaxed at-home feel. Bra straps and partial cup visible through the open cardigan.
+- LOOK B (product demo shots): SAME PERSON, SAME hair, SAME makeup, SAME bare neck — just with the cardigan removed (off-shoulder or behind), so the bra is fully visible. Shows fit, silhouette, strap placement, fabric on skin.
+Cuts between LOOK A ↔ LOOK B = same woman, cardigan added/removed only. Do NOT attempt in-frame undressing.
 
 [SHOT SEQUENCE]
 Every shot = a real person doing something. No static images. No product-on-white-background shots.
