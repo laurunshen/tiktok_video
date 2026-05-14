@@ -395,12 +395,22 @@ router.post('/', upload.fields([
       // 强制注入固定指令块（Gemini 在长 prompt 里会偷偷压缩这些规则，所以由代码硬拼接）
       // 插在 prompt 末尾的 --- 之前；如果没有 ---，直接追加
       const rawPrompt = geminiResult.seedance_prompt || ''
+
+      // Color Lock 兜底：根据 Pass 1 选定的 dominant_color 动态生成块，强制 Seedance 锁定单一颜色
+      const dominantColor = geminiResult.dominant_color || geminiResult.product_visual_features?.color
+      const colorLockBlock = dominantColor ? `
+[COLOR LOCK — HARD CONSTRAINT, applies to every frame]
+The product appearing in the video MUST be ${dominantColor} ONLY. Reference images may include other color SKU variants (black, white, nude, etc.) — those are provided ONLY for structural reference (back closure, strap layout, hardware). DO NOT mix colors. The bra worn by the presenter throughout the entire video is ${dominantColor}. If any frame would render the bra in a different color, REGENERATE that frame in ${dominantColor}.
+` : ''
+
+      const allBlocks = SEEDANCE_MANDATORY_BLOCKS + (colorLockBlock ? '\n\n' + colorLockBlock.trim() : '')
       const lastDashIdx = rawPrompt.lastIndexOf('\n---')
       const finalPrompt = lastDashIdx > -1
-        ? rawPrompt.slice(0, lastDashIdx) + '\n\n' + SEEDANCE_MANDATORY_BLOCKS + '\n' + rawPrompt.slice(lastDashIdx)
-        : rawPrompt + '\n\n' + SEEDANCE_MANDATORY_BLOCKS
+        ? rawPrompt.slice(0, lastDashIdx) + '\n\n' + allBlocks + '\n' + rawPrompt.slice(lastDashIdx)
+        : rawPrompt + '\n\n' + allBlocks
       geminiResult.seedance_prompt = finalPrompt
-      console.log(`[${jobId}] 已注入 6 个 MANDATORY 指令块（FACE/REFERENCE/ANATOMICAL/NO-TEXT/NO-IMPROV/BODY-ATTACHMENT），prompt 总长 ${finalPrompt.length} 字符`)
+      const blockCount = 6 + (dominantColor ? 1 : 0)
+      console.log(`[${jobId}] 已注入 ${blockCount} 个 MANDATORY 指令块${dominantColor ? `（含 COLOR LOCK = ${dominantColor}）` : ''}，prompt 总长 ${finalPrompt.length} 字符`)
 
       setStep(2, `创建 ${batchCount} 个 Seedance 生成任务`)
       const tasks = await createBatchTasks({

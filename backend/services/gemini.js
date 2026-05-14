@@ -759,9 +759,20 @@ Step 1b — Video analysis (used by Pass 2 to write the prompt):
 - ugc_style_notes: authenticity cues, casual delivery, relatable moments
 - mood: overall energy and feel
 
-TASK 2 - Select the best 5-9 product images.
-Prioritize: hero/overview shot, key feature close-ups, texture/material details, functional details, on-body fit shots if available.
-Return their indices (1-based). Pass 2 will only see these selected images, so PICK CAREFULLY — anything not selected won't influence the final prompt.
+TASK 2 - Select the best 5-9 product images, with COLOR-AWARE selection.
+
+STEP 2.1 — Identify the DOMINANT color SKU first:
+The product likely has multiple color variants in the images (e.g. beige, black, white, nude pink). Pick ONE color to be the DOMINANT color featured in the video. Decision rule:
+  • Prefer the color shown in the FIRST few images (typically the merchant's hero/main SKU)
+  • If multiple colors appear equally, pick the most photogenic neutral (beige > nude > white > black)
+  • Output this single color name in the dominant_color field below
+
+STEP 2.2 — Select 5-9 images using these priority rules:
+  • PRIORITIZE: images showing the DOMINANT color in hero/overview/on-body/close-up shots
+  • ACCEPT (with caution): non-dominant-color images ONLY when they show structural information (e.g. back closure, strap placement) that NO dominant-color image covers, AND mark them in image_color_role as "structure-only-different-color"
+  • Each selected image gets a role label in image_color_role: either "dominant-color" or "structure-only-different-color"
+
+Return indices (1-based) and the role array. Pass 2 will only see selected images.
 
 TASK 2b - Describe the product's KEY VISUAL FEATURES (CRITICAL — generated video must match these exactly):
 Look at the product images carefully. Describe ONLY what you actually see — no assumptions.
@@ -834,9 +845,11 @@ Return ONLY this valid JSON, no markdown fences, no explanation:
   },
   "key_segment_start_seconds": 0,
   "key_segment_end_seconds": 15,
+  "dominant_color": "the single SKU color the video should feature (e.g. 'Warm Beige')",
   "selected_image_indices": [1, 3, 5, 7, 9],
+  "image_color_role": ["dominant-color", "dominant-color", "dominant-color", "structure-only-different-color", "dominant-color"],
   "compressed_script": "the ${targetDuration}s script (≤${Math.round(targetDuration * 2.8)} words, all flagged words replaced)",
-  "image_selection_reasoning": "1-2 sentences explaining why these images were chosen"
+  "image_selection_reasoning": "1-2 sentences explaining why these images were chosen, and which images are non-dominant-color but kept for structural reasons"
 }`,
   })
 
@@ -902,6 +915,15 @@ Fabric look: <copy verbatim from product_visual_features.fabric_visual>
 Color: <copy verbatim from product_visual_features.color>
 Distinguishing details: <copy verbatim from product_visual_features.distinguishing_details>
 Required visual outcome: <write 1-3 plain declarative sentences describing — based on the actual edge_finish/underwire_profile/fabric_drape values for THIS product — what the cups, band edges, and underwire should literally look like in the video. Examples: "Cups have flat laser-cut edges with no visible stitching or folded trim." / "Underwire sits inside an invisible channel with no raised ridge." / "Fabric drapes as a second skin, cup edges flush against the body." DO NOT write conditional logic. Resolve the conditions yourself based on this product's anchor values and write the final outcome as plain statements. Video models ignore if/then logic and will blend all keywords from both branches, causing hallucinations.>
+
+[COLOR LOCK — CRITICAL, applies to every frame and every shot]
+The product in the generated video MUST appear in <DOMINANT_COLOR> ONLY. Reference images may show multiple color SKUs (variant images for the listing) — IGNORE all colors except <DOMINANT_COLOR>. Specifically:
+  • Any reference image showing a different color (black/white/nude/etc.) is included ONLY for STRUCTURAL information (back closure, strap layout, hardware) — DO NOT copy its color into the video
+  • The bra worn by the presenter throughout LOOK A and LOOK B must be <DOMINANT_COLOR>
+  • The presenter's [OUTFIT] description must explicitly say "<DOMINANT_COLOR> bra"
+  • In the [SHOT SEQUENCE], every shot describing the bra must mention "<DOMINANT_COLOR>" at least once across the sequence
+  • In the [OPENING LINE], the color must appear
+Treat <DOMINANT_COLOR> as a hard lock. If you (the prompt writer) feel tempted to write "any color" or "<color1> or <color2>" — STOP and use <DOMINANT_COLOR> only.
 
 [PRODUCT NOTES - internal only, do NOT speak or display these words in video]
 Based on product images: <note key visible details — fabric color, texture, strap style, clasp type, construction>. Use to write accurate action descriptions only.
@@ -1083,6 +1105,7 @@ IMPORTANT RULES:
 - The seedance_prompt MUST follow the FIXED STRUCTURE above exactly. Replace every <...> placeholder with concrete content based on the PASS 1 analysis and the product images shown.
 - Copy product_visual_features values VERBATIM into the [PRODUCT VISUAL ANCHOR] block. Do not paraphrase.
 - Use the compressed_script from PASS 1 as the source of all spoken dialogue — distribute it across SHOT SEQUENCE lines, preserving exact wording.
+- COLOR LOCK: Pass 1 chose dominant_color = "${pass1Result.dominant_color || 'unspecified'}". Replace EVERY occurrence of <DOMINANT_COLOR> in the template with this exact color name. Mention this color at least 3 times across the whole prompt: in [OPENING LINE], [OUTFIT], and [SHOT SEQUENCE]. Never write "any color" or "<color1> or <color2>" — only this single color.
 - Do NOT include [FACE & LIKENESS], [REFERENCE VIDEO USAGE], [ANATOMICAL ACCURACY], [NO ON-SCREEN TEXT], [NO IMPROVISED DIALOGUE], or [BODY ATTACHMENT BAN] blocks — these are appended automatically by the pipeline.
 - CRITICAL — NO CONDITIONAL LOGIC IN PROMPT: The seedance_prompt is consumed by a video model that does NOT understand "if/then" / "if X then Y" / "when anchor says X" / conditional clauses. It blends ALL keywords from BOTH branches of any conditional, causing severe hallucinations. RESOLVE every conditional based on PASS 1's actual product_visual_features values and write the FINAL OUTCOME as plain declarative sentences. Never leave words like "if", "when anchor says", "depending on" in the final prompt.
 
