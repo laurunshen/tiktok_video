@@ -41,6 +41,9 @@ Hands have exactly 5 fingers in natural positions. No fused/extra/missing finger
 
 [NO IMPROVISED DIALOGUE]
 The presenter speaks ONLY the exact lines in SHOT SEQUENCE. NO "link in bio", "okay bye", "thanks for watching" or other ad-libbed closers.
+
+[NO MIRROR FLIP — anti-shortcut for shot variation]
+When SHOT SEQUENCE asks for a new camera angle, render an actual rotated body / different framing. NEVER achieve "different angle" by horizontally flipping a previous frame — that visibly swaps background props (lamp on left becomes lamp on right) and hair parting (left part becomes right part), breaking spatial continuity. Same room, same camera position, presenter actually rotates her body in 3D.
 `.trim()
 
 async function imageToInlinePart(filePath, originalName) {
@@ -974,10 +977,15 @@ ANTI-LOOPING RULE — Seedance has a documented "boomerang effect": when two con
   • NEVER place two consecutive LOOK B shots that both involve "hand-on-chest-area" actions
   • Each LOOK B segment should be ≤ 5 seconds at most — if longer demo time is needed, break with a LOOK A cutaway
 
-[0–4s] LOOK A. Medium close-up — she faces camera, talks fast. Says: "<part 1 of compressed_script>"
-[4–8s] LOOK B. Wears only the product. SURFACE-ONLY action (single finger or open palm on large flat areas — see ACTION SAFETY above) — <e.g. "she turns sideways showing the silhouette", "she runs her palm flat along the band on top of the fabric", "she rests her hand flat on her collarbone gesturing to the neckline">. Fast voiceover: "<part 2 of compressed_script>"
-[8–11s] LOOK A. Cuts back to the cardigan look, talking head. Says: "<part 3 of compressed_script>"
-[11–${targetDuration}s] LOOK B. PHYSICALLY DIFFERENT angle/position from the [4-8s] LOOK B (e.g. if [4-8s] was front-facing palm-on-band, this one is back-turned showing the seamless back, OR a side-angle silhouette shot, OR a slow walk to the side). SURFACE-ONLY interaction (NO pinching, lifting, or pulling of thin product parts). Voiceover: "<SHORT closing — max 6 words. Must finish with 1s to spare.>"
+[0–4s] LOOK A. Medium close-up — she faces camera straight-on (camera at eye level, presenter facing forward). Talks fast. Says: "<part 1 of compressed_script>"
+[4–8s] LOOK B. FRONT-FACING shot of presenter (camera is directly in front, she faces camera). Wears only the product. SURFACE-ONLY action (single finger or open palm on large flat areas — see ACTION SAFETY above) — <e.g. "she runs her palm flat along the band on top of the fabric", "she rests her hand flat on her collarbone gesturing to the neckline">. Fast voiceover: "<part 2 of compressed_script>"
+[8–11s] LOOK A. Cuts back to the cardigan look, talking head, FRONT-FACING. Says: "<part 3 of compressed_script>"
+[11–${targetDuration}s] LOOK B. CRITICAL — this shot must be a GENUINELY DIFFERENT camera angle, NOT a mirror flip of the previous LOOK B. Pick ONE specific framing from this list:
+   • OPTION 1 — SIDE PROFILE: presenter physically rotates her body 90° to her own right (camera stays in same place); we now see her left side profile silhouette of the bra cup and band line. Hair stays on the same side. Background unchanged.
+   • OPTION 2 — BACK-TURNED 3/4: presenter physically rotates her body 135° (back to camera but slightly angled), showing the back of the bra with the hook-and-eye closure. She glances back over her right shoulder smiling at the end. Hair clearly drapes down her back.
+   • OPTION 3 — STEP CLOSER: presenter takes one step toward camera (camera does NOT move). Frame becomes a tight chest-up close-up of the bra fabric texture. She looks down at the bra then back up at camera.
+DO NOT achieve "different angle" by horizontally mirroring the [4-8s] frame — that breaks spatial logic (background lamps swap sides, hair part flips). The camera stays fixed; the presenter actually moves her body in 3D space.
+SURFACE-ONLY interaction (NO pinching, lifting, or pulling of thin product parts). Voiceover: "<SHORT closing — max 6 words. Must finish with 1s to spare.>"
 
 [STYLE]
 Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.
