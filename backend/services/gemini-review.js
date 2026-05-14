@@ -95,8 +95,8 @@ export async function reviewPrompt({
 Below are the PRODUCT IMAGES the video should accurately depict. Look at them carefully:`,
   })
 
-  // 取最多 5 张产品图
-  const imageSubset = productImageUrls.slice(0, 5)
+  // 取全部选中的产品图（最多 9 张，与上游 Gemini 选图范围一致），保证评估依据完整
+  const imageSubset = productImageUrls.slice(0, 9)
   for (let i = 0; i < imageSubset.length; i++) {
     try {
       parts.push({ text: `\n[Product Image ${i + 1}]` })
@@ -198,7 +198,7 @@ export async function reviseGeminiOutput({
 Below are the PRODUCT IMAGES (for re-checking visual accuracy):`,
   })
 
-  for (let i = 0; i < productImageUrls.slice(0, 5).length; i++) {
+  for (let i = 0; i < productImageUrls.slice(0, 9).length; i++) {
     try {
       parts.push({ text: `\n[Product Image ${i + 1}]` })
       parts.push(await imageUrlToInlinePart(productImageUrls[i]))
