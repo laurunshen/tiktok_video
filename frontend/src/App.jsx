@@ -97,6 +97,9 @@ export default function App() {
   const [batchCount, setBatchCount] = useState(1)
   const [resolution, setResolution] = useState('480p')
   const [duration, setDuration] = useState(15)
+  // VARIANT: 同一标杆视频的裂变配方（不同模特+场景），null=不指定
+  const [variantSeed, setVariantSeed] = useState(null)
+  const [variants, setVariants] = useState([])
   const [jobId, setJobId] = useState(null)
   const [jobStatus, setJobStatus] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -116,6 +119,14 @@ export default function App() {
   useEffect(() => {
     return () => imagePreviews.forEach(url => URL.revokeObjectURL(url))
   }, [imagePreviews])
+
+  // 启动时拉取 variant 配方列表（用于"同一标杆裂变出 5 种不同视频"）
+  useEffect(() => {
+    fetch(`${API}/generate/variants`)
+      .then(r => r.json())
+      .then(d => setVariants(d.variants || []))
+      .catch(() => {})
+  }, [])
 
   const stopTimers = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
@@ -210,6 +221,7 @@ export default function App() {
     if (productInfo) fd.append('productInfo', JSON.stringify(productInfo))
     fd.append('isSameProduct', isSameProduct ? '1' : '0')
     fd.append('batchCount', batchCount)
+    if (variantSeed) fd.append('variantSeed', variantSeed)
     fd.append('resolution', resolution)
     fd.append('duration', duration)
     try {
@@ -258,6 +270,7 @@ export default function App() {
     setTiktokVideoUrl('')
     setProductUrl(''); setProductInfo(null); setProductId(null); setProductError(null); setIsSameProduct(true)
     setBenchmarkVideos([]); setShowBenchmarks(false)
+    setVariantSeed(null)
     setJobId(null); setJobStatus(null); setLoading(false)
     setCurrentStep(-1); setError(null); setWaitSec(0); setCategory('lingerie')
   }
@@ -525,6 +538,47 @@ export default function App() {
                 onChange={e => setDuration(Number(e.target.value))} />
             </div>
           </div>
+
+          {/* VARIANT 选择器：同一标杆视频的裂变（不同模特+场景） */}
+          {variants.length > 0 && (
+            <div style={{ marginTop: 14, padding: 12, background: '#f3f4f6', borderRadius: 8, border: '1px solid #e5e7eb' }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#1f2937', marginBottom: 4 }}>
+                🎭 模特/场景配方（用于同一标杆视频的裂变 - 防 TikTok 查重）
+              </div>
+              <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 10 }}>
+                选不同配方 = 同一标杆能产出多条不重复的 AI 视频。不选 = 让 Pass 1 自由判断
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 8 }}>
+                <button
+                  onClick={() => setVariantSeed(null)}
+                  style={{
+                    padding: '8px 10px', fontSize: 12, border: '2px solid', borderColor: variantSeed === null ? '#6366f1' : '#e5e7eb',
+                    borderRadius: 6, background: variantSeed === null ? '#eef2ff' : '#fff',
+                    cursor: 'pointer', textAlign: 'left',
+                    fontWeight: variantSeed === null ? 600 : 400, color: variantSeed === null ? '#4338ca' : '#6b7280',
+                  }}>
+                  🎲 不指定<br/>
+                  <span style={{ fontSize: 10, fontWeight: 400 }}>让 AI 自由判断</span>
+                </button>
+                {variants.map(v => (
+                  <button key={v.seed}
+                    onClick={() => setVariantSeed(v.seed)}
+                    title={`${v.presenter}\n场景: ${v.scene}`}
+                    style={{
+                      padding: '8px 10px', fontSize: 12, border: '2px solid', borderColor: variantSeed === v.seed ? '#6366f1' : '#e5e7eb',
+                      borderRadius: 6, background: variantSeed === v.seed ? '#eef2ff' : '#fff',
+                      cursor: 'pointer', textAlign: 'left',
+                      fontWeight: variantSeed === v.seed ? 600 : 400, color: variantSeed === v.seed ? '#4338ca' : '#374151',
+                    }}>
+                    #{v.seed} {v.label}<br/>
+                    <span style={{ fontSize: 10, fontWeight: 400, color: variantSeed === v.seed ? '#6366f1' : '#9ca3af' }}>
+                      鼠标悬停看详情
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {error && <div style={s.err}>⚠️ {error}</div>}

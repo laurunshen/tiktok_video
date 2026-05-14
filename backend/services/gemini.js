@@ -16,6 +16,48 @@ const genai = new GoogleGenAI({
 // Gemini inline 图片上限建议 1MB，超了先压缩
 const GEMINI_IMAGE_MAX_BYTES = 1 * 1024 * 1024
 
+// VARIANT 配方：同一标杆视频的多次裂变，每次用不同的模特 + 场景，避免 TikTok 查重
+// 5 种配方都是美国 TikTok 内衣品类的真实主流分布（参考店铺投流标杆达人画像）
+// 非美国市场或非内衣类目时，请相应调整这个表
+export const VARIANT_RECIPES = {
+  1: {
+    label: 'Latina',
+    presenter: 'Hispanic/Latina woman, mid-20s, olive to warm tan skin tone, dark brown wavy hair, warm facial features with a soft natural smile, naturally curvy body',
+    scene: 'Bright morning bedroom with white linens and soft natural sunlight streaming through a sheer curtain. Minimal decor on the wall behind her.',
+    cardigan_color: 'cream knit cardigan',
+  },
+  2: {
+    label: 'All-American White',
+    presenter: 'Caucasian woman, mid-20s, fair skin with light freckles, medium-length light brown or dirty blonde hair, soft oval face, slim-to-average body',
+    scene: 'Cozy minimalist living room corner with a beige sofa and a single framed photo on the wall. Late afternoon golden window light from the side.',
+    cardigan_color: 'oversized white linen cardigan',
+  },
+  3: {
+    label: 'Curvy Influencer',
+    presenter: 'Caucasian/mixed woman, mid-to-late 20s, fair skin, medium brown hair pulled back, full round face, plus-size curvy body type (size 14-16)',
+    scene: 'White-tile bathroom with a large vanity mirror behind her. Bright overhead daylight + warm vanity bulbs. Clean uncluttered counter.',
+    cardigan_color: 'soft taupe oversized cardigan',
+  },
+  4: {
+    label: 'Mixed/Light Black',
+    presenter: 'Light-skinned Black or mixed-race woman, mid-20s, warm caramel skin tone, natural curly hair pulled into a high puff, defined cheekbones, slim athletic body',
+    scene: 'Hallway with a full-length mirror behind her, neutral beige wall paint and a hardwood floor. Soft window light from the left.',
+    cardigan_color: 'black ribbed open cardigan',
+  },
+  5: {
+    label: 'Girl-Next-Door Brunette',
+    presenter: 'Caucasian/mixed-race woman, early-to-mid 20s, fair-to-light tan skin, dark brown or black straight long hair pulled into a low ponytail, friendly approachable face, slim body',
+    scene: 'Vanity table corner with a small ring of soft warm bulbs around an oval mirror. Bedroom in the background blurred. Cozy intimate vibe.',
+    cardigan_color: 'cropped grey hoodie left open',
+  },
+}
+
+export function getVariantRecipe(seed) {
+  const n = parseInt(seed)
+  if (n >= 1 && n <= 5) return VARIANT_RECIPES[n]
+  return null
+}
+
 // 强制注入 Seedance prompt 的固定指令块。Gemini 在长 prompt 里会偷偷压缩这些规则，
 // 所以由 generate.js 拿到 Gemini 输出后用代码硬拼接，保证 100% 进入 Seedance prompt。
 // 强制注入到 prompt 末尾的硬性约束块。按重要性从高到低排列。
@@ -922,6 +964,7 @@ async function geminiPass2WritePrompt({
   targetDuration,
   category,
   userDescription,
+  variantRecipe,  // 可选：{label, presenter, scene, cardigan_color}，用于裂变
 }) {
   const dialogueRule = isSameProduct
     ? `1. SPOKEN DIALOGUE: Use the compressed_script verbatim from PASS 1 ANALYSIS. Distribute it across the SHOT SEQUENCE shots, preserving the exact wording.`
@@ -1151,7 +1194,12 @@ IMPORTANT RULES:
 - The seedance_prompt MUST follow the FIXED STRUCTURE above exactly. Replace every <...> placeholder with concrete content based on the PASS 1 analysis and the product images shown.
 - Copy product_visual_features values VERBATIM into the [PRODUCT VISUAL ANCHOR] block. Do not paraphrase.
 - Use the compressed_script from PASS 1 as the source of all spoken dialogue — distribute it across SHOT SEQUENCE lines, preserving exact wording.
-- COLOR LOCK: Pass 1 chose dominant_color = "${pass1Result.dominant_color || 'unspecified'}". Replace EVERY occurrence of <DOMINANT_COLOR> in the template with this exact color name. Mention this color at least 3 times across the whole prompt: in [OPENING LINE], [OUTFIT], and [SHOT SEQUENCE]. Never write "any color" or "<color1> or <color2>" — only this single color.
+- COLOR LOCK: Pass 1 chose dominant_color = "${pass1Result.dominant_color || 'unspecified'}". Replace EVERY occurrence of <DOMINANT_COLOR> in the template with this exact color name. Mention this color at least 3 times across the whole prompt: in [OPENING LINE], [OUTFIT], and [SHOT SEQUENCE]. Never write "any color" or "<color1> or <color2>" — only this single color.${variantRecipe ? `
+- VARIANT RECIPE LOCK (this run is variant "${variantRecipe.label}" — used to diversify outputs from the same reference video for TikTok anti-duplicate):
+  • PRESENTER block MUST describe exactly: ${variantRecipe.presenter}
+  • [STYLE] background MUST be: ${variantRecipe.scene}
+  • OUTFIT LOOK A cardigan MUST be: ${variantRecipe.cardigan_color}
+  • Override any conflicting hint from the reference video. The presenter and scene are NOT inferred from the reference — they are FIXED by this variant recipe.` : ''}
 - Do NOT include [FACE & LIKENESS], [REFERENCE VIDEO USAGE], [ANATOMICAL ACCURACY], [NO ON-SCREEN TEXT], [NO IMPROVISED DIALOGUE], or [BODY ATTACHMENT BAN] blocks — these are appended automatically by the pipeline.
 - CRITICAL — NO CONDITIONAL LOGIC IN PROMPT: The seedance_prompt is consumed by a video model that does NOT understand "if/then" / "if X then Y" / "when anchor says X" / conditional clauses. It blends ALL keywords from BOTH branches of any conditional, causing severe hallucinations. RESOLVE every conditional based on PASS 1's actual product_visual_features values and write the FINAL OUTCOME as plain declarative sentences. Never leave words like "if", "when anchor says", "depending on" in the final prompt.
 
@@ -1194,7 +1242,12 @@ export async function analyzeAndGeneratePrompt({
   category = 'general',
   productInfo = null,
   isSameProduct = true,
+  variantSeed = null,  // 1-5 选不同的模特+场景配方，避免标杆复用时被查重
 }) {
+  const variantRecipe = getVariantRecipe(variantSeed)
+  if (variantRecipe) {
+    console.log(`  [Gemini] 使用 VARIANT ${variantSeed}: ${variantRecipe.label}`)
+  }
   // 1) 准备视频和图片 inline parts
   const { videoPart, tmpVideoPath } = await prepareVideoPart(videoUrl, videoFilePath)
   const { labelParts, imageOrigins, totalImages, inlinePartByIndex } =
@@ -1258,6 +1311,7 @@ The reference video is NOT for the same product — it is used as a STYLE REFERE
       targetDuration,
       category,
       userDescription,
+      variantRecipe,
     })
   } finally {
     // 清理临时视频文件

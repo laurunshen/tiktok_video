@@ -32,6 +32,7 @@ db.exec(`
     resolution TEXT,
     batch_count INTEGER,
     user_description TEXT,
+    variant_seed INTEGER,                -- 1-5 = 同一标杆的裂变配方编号；NULL = 未指定
 
     -- 时间统计（毫秒）
     created_at INTEGER NOT NULL,
@@ -147,6 +148,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_refvids_benchmark ON reference_videos(is_benchmark);
 `)
 
+// 平滑升级：旧库可能没有新字段，加上忽略错误
+try { db.exec('ALTER TABLE jobs ADD COLUMN variant_seed INTEGER') } catch {}
+
 console.log(`[DB] SQLite 已初始化: ${DB_PATH}`)
 
 // ===== Job 操作 =====
@@ -160,14 +164,14 @@ export function saveJob(job) {
     INSERT OR REPLACE INTO jobs (
       job_id, status, step, step_label,
       product_id, reference_video_url, reference_video_author, category,
-      is_same_product, duration, resolution, batch_count, user_description,
+      is_same_product, duration, resolution, batch_count, user_description, variant_seed,
       created_at, started_at, completed_at,
       gemini_pass1_ms, gemini_pass2_ms, gemini_review_ms, seedance_ms, total_ms,
       error_message, full_data
     ) VALUES (
       @job_id, @status, @step, @step_label,
       @product_id, @reference_video_url, @reference_video_author, @category,
-      @is_same_product, @duration, @resolution, @batch_count, @user_description,
+      @is_same_product, @duration, @resolution, @batch_count, @user_description, @variant_seed,
       @created_at, @started_at, @completed_at,
       @gemini_pass1_ms, @gemini_pass2_ms, @gemini_review_ms, @seedance_ms, @total_ms,
       @error_message, @full_data
@@ -188,6 +192,7 @@ export function saveJob(job) {
     resolution: job.resolution ?? null,
     batch_count: job.batchCount ?? null,
     user_description: job.userDescription ?? null,
+    variant_seed: job.variantSeed ?? null,
     created_at: job.createdAt ? new Date(job.createdAt).getTime() : Date.now(),
     started_at: job.startedAt ?? null,
     completed_at: job.completedAt ?? null,

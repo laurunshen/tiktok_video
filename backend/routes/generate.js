@@ -6,7 +6,7 @@ import { unlink, writeFile } from 'fs/promises'
 import { spawn } from 'child_process'
 import { v4 as uuidv4 } from 'uuid'
 import axios from 'axios'
-import { analyzeAndGeneratePrompt, SEEDANCE_MANDATORY_BLOCKS } from '../services/gemini.js'
+import { analyzeAndGeneratePrompt, SEEDANCE_MANDATORY_BLOCKS, VARIANT_RECIPES } from '../services/gemini.js'
 import { validateGeminiOutput, formatValidationReport } from '../services/prompt-validator.js'
 import { reviewPrompt, reviseGeminiOutput, formatReviewReport, clearImageCache } from '../services/gemini-review.js'
 import { saveJob, getJob, listJobs, countJobs, saveVideo } from '../services/db.js'
@@ -171,6 +171,9 @@ router.post('/', upload.fields([
     const batchCount = parseInt(req.body.batchCount) || 1
     const resolution = req.body.resolution || '480p'
     const duration = parseInt(req.body.duration) || 15
+    // variantSeed: 1-5 选不同的模特+场景配方，用于同一标杆视频的裂变（避免 TikTok 查重）
+    // null = 不指定 variant（兼容旧调用）
+    const variantSeed = req.body.variantSeed ? parseInt(req.body.variantSeed) : null
 
     // 产品图：用户上传 + 商品链接抓取的图片合并（不再二选一），由 Gemini 从合集中筛选最好的
     const scrapedImageUrls = productInfo
@@ -211,7 +214,7 @@ router.post('/', upload.fields([
       referenceVideoUrl: tiktokVideoUrl || null,
       referenceVideoAuthor: extractTikTokAuthor(tiktokVideoUrl),
       category, isSameProduct, duration, resolution,
-      batchCount, userDescription,
+      batchCount, userDescription, variantSeed,
     }
     saveJob(global.jobStore[jobId])
 
@@ -249,6 +252,7 @@ router.post('/', upload.fields([
       }
 
       setStep(1, 'Gemini 分析参考视频 + 筛选图片 + 生成提示词')
+      console.log(`[${jobId}] variantSeed=${variantSeed ?? '无'}`)
       const geminiResult = await analyzeAndGeneratePrompt({
         videoFilePath: referenceVideoFile?.path,
         videoUrl: resolvedVideoUrl,
@@ -260,6 +264,7 @@ router.post('/', upload.fields([
         category,
         productInfo,
         isSameProduct,
+        variantSeed,
       })
       console.log(`[${jobId}] 类目: ${geminiResult.video_analysis?.product_category}，选中图片: ${geminiResult.selected_image_indices}`)
 
@@ -583,6 +588,17 @@ router.get('/status/:jobId', async (req, res) => {
     taskCount: job.tasks?.length || 0,
     error: job.error,
   })
+})
+
+// GET /api/generate/variants - 返回所有 variant 配方供前端展示
+router.get('/variants', (req, res) => {
+  const variants = Object.entries(VARIANT_RECIPES).map(([seed, recipe]) => ({
+    seed: parseInt(seed),
+    label: recipe.label,
+    presenter: recipe.presenter,
+    scene: recipe.scene,
+  }))
+  res.json({ count: variants.length, variants })
 })
 
 // GET /api/generate/jobs?limit=50&offset=0&status=completed - 历史任务列表
