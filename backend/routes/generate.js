@@ -8,15 +8,66 @@ import { v4 as uuidv4 } from 'uuid'
 import axios from 'axios'
 import { analyzeAndGeneratePrompt, SEEDANCE_MANDATORY_BLOCKS } from '../services/gemini.js'
 import { validateGeminiOutput, formatValidationReport } from '../services/prompt-validator.js'
-import { reviewPrompt, reviseGeminiOutput, formatReviewReport } from '../services/gemini-review.js'
+import { reviewPrompt, reviseGeminiOutput, formatReviewReport, clearImageCache } from '../services/gemini-review.js'
 import { uploadImagesToKie, uploadFileToKie } from '../services/kieai-upload.js'
 import { createBatchTasks, getTaskStatus, parseTaskResult } from '../services/kieai.js'
 import { getTikTokPlaybackUrl } from '../services/snaptik.js'
 
-// 用 ffmpeg 截取视频片段
-function ffmpegClip(srcPath, startSec, endSec, outPath) {
+// 用 ffprobe 探测视频实际时长（秒，浮点数）
+function ffprobeDuration(filePath) {
   return new Promise((resolve, reject) => {
-    // 精确切片：先 -i 再 -ss / -t 配合重编码，避免 keyframe 对齐误差导致片段超长
+    const proc = spawn('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      filePath,
+    ])
+    let stdout = ''
+    let stderr = ''
+    proc.stdout.on('data', d => { stdout += d.toString() })
+    proc.stderr.on('data', d => { stderr += d.toString() })
+    proc.on('close', code => {
+      if (code === 0) {
+        const dur = parseFloat(stdout.trim())
+        if (Number.isFinite(dur)) resolve(dur)
+        else reject(new Error(`ffprobe duration parse failed: "${stdout}"`))
+      } else {
+        reject(new Error(`ffprobe exit ${code}: ${stderr.slice(-200)}`))
+      }
+    })
+    proc.on('error', reject)
+  })
+}
+
+// 用 ffmpeg 截取视频片段（流复制版，速度提升 ~10x）
+// 注意：流复制会对齐到最近的关键帧，端点可能略短（不会超长）
+// 传入的 endSec 已经留了余量（≤14s），所以实际输出始终 < 15s 满足 Seedance 上限
+function ffmpegClipStreamCopy(srcPath, startSec, endSec, outPath) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-y',
+      '-ss', String(startSec),       // -ss 在 -i 前 = 快速 seek 到关键帧
+      '-i', srcPath,
+      '-t', String(endSec - startSec),
+      '-c', 'copy',                   // 流复制，不重编码
+      '-avoid_negative_ts', 'make_zero',
+      '-movflags', '+faststart',
+      outPath,
+    ]
+    const proc = spawn('ffmpeg', args)
+    let stderr = ''
+    proc.stderr.on('data', d => { stderr += d.toString() })
+    proc.on('close', code => {
+      if (code === 0) resolve()
+      else reject(new Error(`ffmpeg(stream-copy) exit ${code}: ${stderr.slice(-500)}`))
+    })
+    proc.on('error', reject)
+  })
+}
+
+// 精确重编码版（兜底用）：当流复制结果异常时回退使用
+function ffmpegClipReencode(srcPath, startSec, endSec, outPath) {
+  return new Promise((resolve, reject) => {
     const args = [
       '-y',
       '-i', srcPath,
@@ -33,10 +84,33 @@ function ffmpegClip(srcPath, startSec, endSec, outPath) {
     proc.stderr.on('data', d => { stderr += d.toString() })
     proc.on('close', code => {
       if (code === 0) resolve()
-      else reject(new Error(`ffmpeg exit ${code}: ${stderr.slice(-500)}`))
+      else reject(new Error(`ffmpeg(reencode) exit ${code}: ${stderr.slice(-500)}`))
     })
     proc.on('error', reject)
   })
+}
+
+// 主入口：先尝试流复制，如果失败或结果超长（>15s）则回退到重编码
+const SEEDANCE_MAX_CLIP_SECONDS = 15
+async function ffmpegClip(srcPath, startSec, endSec, outPath) {
+  // 第 1 次尝试：流复制
+  await ffmpegClipStreamCopy(srcPath, startSec, endSec, outPath)
+  try {
+    const actualDur = await ffprobeDuration(outPath)
+    if (actualDur < SEEDANCE_MAX_CLIP_SECONDS) {
+      console.log(`  [ffmpeg] 流复制成功，实际时长 ${actualDur.toFixed(2)}s < ${SEEDANCE_MAX_CLIP_SECONDS}s ✅`)
+      return
+    }
+    console.warn(`  [ffmpeg] 流复制结果 ${actualDur.toFixed(2)}s ≥ ${SEEDANCE_MAX_CLIP_SECONDS}s，回退到精确重编码`)
+  } catch (e) {
+    console.warn(`  [ffmpeg] ffprobe 探测失败（${e.message}），保险起见回退到重编码`)
+  }
+  // 兜底：重编码（确保严格 ≤ endSec - startSec）
+  await ffmpegClipReencode(srcPath, startSec, endSec, outPath)
+  const finalDur = await ffprobeDuration(outPath).catch(() => null)
+  if (finalDur != null) {
+    console.log(`  [ffmpeg] 重编码完成，实际时长 ${finalDur.toFixed(2)}s`)
+  }
 }
 
 const router = express.Router()
@@ -74,7 +148,9 @@ router.post('/', upload.fields([
   { name: 'productImages', maxCount: 20 },
 ]), async (req, res) => {
   const allFiles = []
-  
+  // 收集本任务用到的产品图 URL，任务结束时精准清理它们的 review 缓存（不影响并发任务）
+  const taskImageUrls = []
+
   try {
     const referenceVideoFile = req.files?.referenceVideo?.[0]
     const productImageFiles = req.files?.productImages || []
@@ -190,6 +266,7 @@ router.post('/', upload.fields([
       const finalReferenceImageUrls = (geminiResult.selected_images || [])
         .map(s => s.publicUrl)
         .filter(Boolean)
+      taskImageUrls.push(...finalReferenceImageUrls)
       console.log(`[${jobId}] Seedance 引用图: ${finalReferenceImageUrls.length} 张`)
 
       // Step 2b: ffmpeg 截取关键片段并上传到 kie.ai 作为 Seedance reference_video
@@ -348,6 +425,8 @@ router.post('/', upload.fields([
       job.error = err.message
     } finally {
       await cleanupFiles(allFiles)
+      // 精准清理本任务用过的图片缓存（不影响并发任务）
+      try { if (taskImageUrls.length > 0) clearImageCache(taskImageUrls) } catch {}
     }
 
   } catch (err) {

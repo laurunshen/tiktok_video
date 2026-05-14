@@ -21,7 +21,35 @@ const genai = new GoogleGenAI({
 
 const MAX_IMG_BYTES = 1 * 1024 * 1024
 
+// In-memory 缓存：URL → inlineData base64 part
+// 避免 review 和 revise（最多 4 次调用）重复下载 + sharp 压缩同一批产品图
+// 简单 LRU：超过 100 条删最旧的，避免长期内存泄漏
+const imagePartCache = new Map()
+const IMAGE_CACHE_MAX = 100
+
+function cacheGet(url) {
+  const v = imagePartCache.get(url)
+  if (v) {
+    // 重新插入到末尾，模拟 LRU 访问顺序
+    imagePartCache.delete(url)
+    imagePartCache.set(url, v)
+  }
+  return v
+}
+
+function cacheSet(url, part) {
+  if (imagePartCache.size >= IMAGE_CACHE_MAX) {
+    const oldest = imagePartCache.keys().next().value
+    imagePartCache.delete(oldest)
+  }
+  imagePartCache.set(url, part)
+}
+
 async function imageUrlToInlinePart(url) {
+  const cached = cacheGet(url)
+  if (cached) {
+    return cached
+  }
   const { default: sharp } = await import('sharp')
   const res = await axios.get(url, {
     responseType: 'arraybuffer',
@@ -35,9 +63,11 @@ async function imageUrlToInlinePart(url) {
   if (buf.length > MAX_IMG_BYTES) {
     buf = await sharp(buf).jpeg({ quality: 55 }).toBuffer()
   }
-  return {
+  const part = {
     inlineData: { mimeType: 'image/jpeg', data: buf.toString('base64') },
   }
+  cacheSet(url, part)
+  return part
 }
 
 /**
@@ -234,6 +264,15 @@ Return ONLY valid JSON, no markdown:
     console.error('[revise] JSON parse failed, returning original:', e.message)
     return null
   }
+}
+
+// 任务结束时清理这次任务用到的图片缓存（避免长期运行内存膨胀）
+export function clearImageCache(urls) {
+  if (!urls) {
+    imagePartCache.clear()
+    return
+  }
+  for (const url of urls) imagePartCache.delete(url)
 }
 
 export function formatReviewReport(review) {

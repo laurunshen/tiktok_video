@@ -58,7 +58,9 @@
       "Bash(git config *)",
       "Bash(git add *)",
       "Bash(git commit -q -m ' *)",
-      "Bash(node --check services/gemini.js)"
+      "Bash(node --check services/gemini.js)",
+      "Bash(git commit *)",
+      "Bash(ffprobe -version)"
     ]
   }
 }
