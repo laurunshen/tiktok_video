@@ -187,13 +187,22 @@ export default function App() {
   useEffect(() => () => stopTimers(), [stopTimers])
 
   const handleSubmit = async () => {
-    if (!refVideo[0] || images.length === 0) {
-      setError('请先上传参考视频和至少一张产品图')
+    // 视频：本地上传 或 TikTok 链接，二选一即可
+    const hasVideo = refVideo[0] || tiktokVideoUrl.trim()
+    // 产品图：本地上传 或 商品链接抓取，二选一即可
+    const hasProductImages = images.length > 0 || (productInfo && (productInfo.mainImageUrls?.length > 0 || productInfo.detailImageUrls?.length > 0))
+
+    if (!hasVideo) {
+      setError('请提供参考视频（上传文件或填写 TikTok 链接）')
+      return
+    }
+    if (!hasProductImages) {
+      setError('请提供产品图（上传图片或抓取商品链接）')
       return
     }
     setError(null); setLoading(true); setJobStatus(null); setCurrentStep(0)
     const fd = new FormData()
-    fd.append('referenceVideo', refVideo[0])
+    if (refVideo[0]) fd.append('referenceVideo', refVideo[0])
     images.forEach(img => fd.append('productImages', img))
     if (tiktokVideoUrl) fd.append('tiktokVideoUrl', tiktokVideoUrl)
     fd.append('userDescription', description)
