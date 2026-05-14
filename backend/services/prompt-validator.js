@@ -93,6 +93,29 @@ export function validateGeminiOutput(geminiResult, { targetDuration, finalRefere
     issues.push({ severity: 'critical', field: 'seedance_prompt', problem: '缺少 [SHOT SEQUENCE] 块' })
   }
 
+  // 8. 禁止 if/then 元逻辑泄漏到 prompt（Seedance 不解析条件，会把两个分支的关键词混在一起）
+  const conditionalPatterns = [
+    /\bif\s+edge_finish\b/i,
+    /\bif\s+underwire_profile\b/i,
+    /\bif\s+fabric_drape\b/i,
+    /\bif\s+anchor\s+says\b/i,
+    /\bwhen\s+anchor\s+says\b/i,
+    /=\s*"laser-cut/i,    // 模板占位符泄漏
+    /=\s*"invisible"\s+or\s+"low-profile"/i,
+    /=\s*"second-skin"/i,
+  ]
+  for (const re of conditionalPatterns) {
+    const m = prompt.match(re)
+    if (m) {
+      issues.push({
+        severity: 'critical',
+        field: 'seedance_prompt',
+        problem: `检测到未解析的条件逻辑 "${m[0]}" 泄漏到 prompt — Seedance 会把所有分支关键词混在一起生成。Gemini 必须根据本产品的实际 anchor 值写成纯陈述句。`,
+      })
+      break
+    }
+  }
+
   const hasCritical = issues.some(i => i.severity === 'critical')
   return { pass: !hasCritical, issues }
 }

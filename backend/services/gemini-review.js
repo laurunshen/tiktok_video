@@ -200,9 +200,22 @@ TASK: Output a REVISED version that addresses every "critical" issue. Keep the s
 
 Do NOT add or remove top-level blocks. Do NOT change formatting style. ONLY fix the flagged content.
 
+CRITICAL HARD RULES (these MUST hold in the revised prompt — if any violation remains, the revision will be rejected and re-submitted):
+
+1. NO CONDITIONAL LOGIC. The revised prompt must NOT contain any phrase like "if edge_finish = ...", "if anchor says ...", "when X then Y", "depending on ...", or any other if/then/conditional construct. Video models do NOT process conditional logic — they blend keywords from BOTH branches, causing severe hallucinations. RESOLVE every conditional yourself based on this product's actual product_visual_features values, then write the resolved outcome as plain declarative sentences. Example:
+   ❌ WRONG: "If edge_finish = 'laser-cut flat edges': zero visible stitching."
+   ✅ RIGHT: "Cups have flat laser-cut edges with no visible stitching." (assuming this product's edge_finish is laser-cut)
+   ✅ RIGHT: "Cups have a folded fabric hem with visible topstitching along the top edge." (assuming this product's edge_finish is bound)
+
+2. NO TEMPLATE PLACEHOLDERS. The revised prompt must NOT contain phrases like "[from TASK 2b ... field]", "[Fill in: ...]", or any other unresolved placeholder. Every bracketed slot must be filled with concrete content based on this product.
+
+3. PRODUCT FEATURES MUST MATCH THE IMAGES. Re-examine the product images above. If the original product_visual_features got any field wrong (e.g. described laser-cut edges when the images clearly show stitched hems), CORRECT IT in the revised features AND in the prompt's [PRODUCT VISUAL ANCHOR] block. Trust the images over the original analysis.
+
+4. ADDRESS EVERY CRITICAL ISSUE LISTED ABOVE. Do not leave any reviewer-flagged issue unfixed.
+
 Return ONLY valid JSON, no markdown:
 {
-  "seedance_prompt": "the full revised prompt",
+  "seedance_prompt": "the full revised prompt with NO conditional logic and NO unresolved placeholders",
   "compressed_script": "the revised script",
   "product_visual_features": { ... revised features ... }
 }`,

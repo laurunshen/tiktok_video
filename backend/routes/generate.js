@@ -241,65 +241,78 @@ router.post('/', upload.fields([
       }
 
       // === Gemini 二次评估（拿产品图对照审查 prompt 准确性） ===
+      // 流程：评估 → 失败则修订 → 程序化校验修订结果 → 再评估 → 最多 2 次修订
       setStep(2, 'Gemini 二次评估（对照产品图审查 prompt）')
-      let reviewAttempt = 0
-      const MAX_REVISIONS = 1
-      while (reviewAttempt <= MAX_REVISIONS) {
+      const MAX_REVISIONS = 2
+      let revisionRound = 0
+      let lastReview = null
+
+      while (true) {
+        // === 评估当前 prompt ===
+        let review
         try {
-          const review = await reviewPrompt({
+          review = await reviewPrompt({
             prompt: geminiResult.seedance_prompt,
             compressedScript: geminiResult.compressed_script,
             productVisualFeatures: geminiResult.product_visual_features,
             productImageUrls: finalReferenceImageUrls,
             targetDuration: duration,
           })
-          console.log(`[${jobId}] ${formatReviewReport(review)}`)
-          job.reviewReport = review
-
-          if (review.pass) break
-
-          // 不通过且还有重试机会 → 让 Gemini 修订一次
-          if (reviewAttempt < MAX_REVISIONS) {
-            setStep(2, `根据评估反馈修订 prompt（第 ${reviewAttempt + 1} 次）`)
-            const revised = await reviseGeminiOutput({
-              originalPrompt: geminiResult.seedance_prompt,
-              originalScript: geminiResult.compressed_script,
-              originalFeatures: geminiResult.product_visual_features,
-              reviewSuggestion: review.suggestion,
-              reviewIssues: review.issues.filter(i => i.severity === 'critical'),
-              productImageUrls: finalReferenceImageUrls,
-              targetDuration: duration,
-            })
-            if (revised) {
-              geminiResult.seedance_prompt = revised.seedance_prompt || geminiResult.seedance_prompt
-              geminiResult.compressed_script = revised.compressed_script || geminiResult.compressed_script
-              geminiResult.product_visual_features = revised.product_visual_features || geminiResult.product_visual_features
-              console.log(`[${jobId}] prompt 已修订，重新校验`)
-              // 修订后再跑一次程序化校验
-              const reval = validateGeminiOutput(geminiResult, { targetDuration: duration, finalReferenceImageUrls })
-              if (!reval.pass) {
-                const c = reval.issues.filter(i => i.severity === 'critical').map(i => `[${i.field}] ${i.problem}`).join('; ')
-                throw new Error(`修订后仍未通过程序化校验：${c}`)
-              }
-            } else {
-              console.warn(`[${jobId}] 修订失败，使用原 prompt 继续`)
-              break
-            }
-          } else {
-            // 评估失败但已用完重试次数 → 看 critical 严重程度决定是否硬失败
-            const criticals = review.issues.filter(i => i.severity === 'critical')
-            if (criticals.length > 0) {
-              throw new Error(`Gemini 二次评估发现严重问题（已重试 ${MAX_REVISIONS} 次仍未通过）：${criticals.map(i => i.problem).join('; ')}`)
-            }
-            break
-          }
         } catch (e) {
-          // 评估服务本身出错（网络/超时）不应阻塞主流程
-          if (e.message.includes('未通过') || e.message.includes('严重问题')) throw e
-          console.warn(`[${jobId}] 评估调用异常（跳过评估，使用原 prompt）: ${e.message}`)
+          console.warn(`[${jobId}] 评估调用异常（跳过评估，使用当前 prompt）: ${e.message}`)
           break
         }
-        reviewAttempt++
+        console.log(`[${jobId}] [评估第 ${revisionRound + 1} 轮] ${formatReviewReport(review)}`)
+        lastReview = review
+        job.reviewReport = review
+
+        // === 通过 → 退出循环 ===
+        if (review.pass) {
+          console.log(`[${jobId}] ✅ 二次评估通过（${revisionRound > 0 ? `经过 ${revisionRound} 次修订` : '首次即通过'}）`)
+          break
+        }
+
+        // === 不通过 → 看是否还能修订 ===
+        if (revisionRound >= MAX_REVISIONS) {
+          const criticals = review.issues.filter(i => i.severity === 'critical')
+          throw new Error(`Gemini 二次评估发现严重问题（已修订 ${MAX_REVISIONS} 次仍未通过）：${criticals.map(i => i.problem).join('; ')}`)
+        }
+
+        // === 修订一次 ===
+        revisionRound++
+        setStep(2, `根据评估反馈修订 prompt（第 ${revisionRound}/${MAX_REVISIONS} 次）`)
+        let revised
+        try {
+          revised = await reviseGeminiOutput({
+            originalPrompt: geminiResult.seedance_prompt,
+            originalScript: geminiResult.compressed_script,
+            originalFeatures: geminiResult.product_visual_features,
+            reviewSuggestion: review.suggestion,
+            reviewIssues: review.issues.filter(i => i.severity === 'critical'),
+            productImageUrls: finalReferenceImageUrls,
+            targetDuration: duration,
+          })
+        } catch (e) {
+          console.warn(`[${jobId}] 修订调用异常: ${e.message}，使用上次 prompt 继续`)
+          break
+        }
+        if (!revised || !revised.seedance_prompt) {
+          console.warn(`[${jobId}] 修订返回空，使用上次 prompt 继续`)
+          break
+        }
+        geminiResult.seedance_prompt = revised.seedance_prompt
+        geminiResult.compressed_script = revised.compressed_script || geminiResult.compressed_script
+        geminiResult.product_visual_features = revised.product_visual_features || geminiResult.product_visual_features
+        console.log(`[${jobId}] prompt 已修订（第 ${revisionRound} 次），重新跑程序化校验`)
+
+        // 程序化校验：修订后如果还有 critical（如 if/then 没去掉），直接失败，避免再浪费一次评估
+        const reval = validateGeminiOutput(geminiResult, { targetDuration: duration, finalReferenceImageUrls })
+        if (!reval.pass) {
+          const c = reval.issues.filter(i => i.severity === 'critical').map(i => `[${i.field}] ${i.problem}`).join('; ')
+          throw new Error(`第 ${revisionRound} 次修订后仍未通过程序化校验（说明 Gemini 没正确执行修订指令）：${c}`)
+        }
+
+        // 进入下一轮 while → 重新评估修订后的 prompt
       }
 
       // 强制注入固定指令块（Gemini 在长 prompt 里会偷偷压缩这些规则，所以由代码硬拼接）

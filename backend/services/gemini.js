@@ -267,11 +267,11 @@ Closure: [from TASK 2b closure field]
 Fabric look: [from TASK 2b fabric_visual field]
 Color: [from TASK 2b color field]
 Distinguishing details: [from TASK 2b distinguishing_details field]
-ENFORCEMENT — violations are NOT acceptable:
-• If edge_finish = "laser-cut flat edges": zero visible stitching, zero folded trim, zero raised border on cups or band in any frame
-• If underwire_profile = "invisible" or "low-profile": no prominent ridge, no thick channel seam visible through fabric
-• If fabric_drape = "second-skin": cup edges lie completely flush against skin, no gaps, no stiff cup edges hovering away from body
-• Do NOT substitute a generic seamless sports bra, racerback bra, or padded push-up unless the anchor explicitly describes one
+Required visual outcome: [Write 1-3 plain declarative sentences here that describe — based on the actual edge_finish/underwire_profile/fabric_drape values for THIS product — what the cups, band edges, and underwire should literally look like in the video. Examples of correctly-resolved sentences:
+  • "Cups have flat laser-cut edges with no visible stitching or folded trim."
+  • "Underwire sits inside an invisible channel with no raised ridge."
+  • "Fabric drapes as a second skin, cup edges flush against the body."
+DO NOT write conditional logic ("if edge_finish is X then..."). Resolve the conditions yourself based on this product's anchor values and write the final outcome as plain statements. Video models ignore if/then logic and will blend all keywords from both branches, causing hallucinations.]
 
 [PRODUCT NOTES - internal only, do NOT speak or display these words in video]
 Based on product images: [note key visible details — fabric color, texture, strap style, clasp type, construction]. Use to write accurate action descriptions only.
@@ -331,7 +331,10 @@ NOT a broadcaster voice.
 
 [AVOID]
 No static images in video. No shots without a person. No gimbal. No harsh one-sided lighting. No airbrushed skin. No model poses. No slow delivery. No invented lines. No @Image references in video content.
-PRODUCT ACCURACY — never generate: visible stitched trim or thick bound edges if anchor says laser-cut; prominent underwire ridge if anchor says invisible/low-profile; cup fabric floating away from body if anchor says second-skin drape; wrong silhouette type (e.g. sports bra instead of plunge demi). When in doubt, err toward the anchor description over any creative interpretation.
+PRODUCT ACCURACY — [Write 1-2 plain declarative sentences here describing exactly what visual features must NOT appear, based on this product's actual anchor values. Examples of correctly-resolved sentences:
+  • "Do not show visible stitched trim, folded hems, or thick bound edges on the cups." (when this product has laser-cut edges)
+  • "Do not show a prominent underwire ridge or thick channel seam." (when this product has invisible underwire)
+DO NOT write "if anchor says X then..." — resolve it based on this product and state the bans as plain facts. Video models will blend keywords from both branches of an if/then.]
 PRODUCT INTEGRITY — when the product is shown held in hand or off-body, it must still match the PRODUCT VISUAL ANCHOR exactly: straps in correct positions, closure on the BACK only (never on the front of a back-closure bra), cup count and shape matching the anchor. Do NOT generate distorted, mirror-flipped, or structurally incorrect versions of the product.
 ---`
 
@@ -516,6 +519,7 @@ IMPORTANT RULES:
 - Structure is FIXED — only content changes per product
 - The seedance_prompt MUST include a [PRODUCT VISUAL ANCHOR] block listing the TASK 2b fields verbatim, so Seedance generates the correct silhouette/cups/straps/closure.
 - Do NOT include [FACE & LIKENESS], [REFERENCE VIDEO USAGE], [ANATOMICAL ACCURACY], [NO ON-SCREEN TEXT], [NO IMPROVISED DIALOGUE], or [BODY ATTACHMENT BAN] blocks — these are appended automatically by the pipeline. Focus on generating the dynamic content (PRODUCT VISUAL ANCHOR, PRESENTER, OUTFIT, SHOT SEQUENCE, STYLE, AUTHENTICITY, SPEAKING STYLE, AVOID).
+- CRITICAL — NO CONDITIONAL LOGIC IN PROMPT: The seedance_prompt is consumed by a video model that does NOT understand "if/then" / "if X then Y" / "when anchor says X" / conditional clauses. It blends ALL keywords from BOTH branches of any conditional, causing severe hallucinations. Whenever the template contains a conditional placeholder, RESOLVE the condition based on this product's actual TASK 2b values and write the FINAL OUTCOME as a plain declarative sentence. Never leave words like "if", "when anchor says", "depending on", or template variable names like "edge_finish = ..." in the final prompt. The final prompt must read as a list of facts, not rules.
 
 Return ONLY this valid JSON, no markdown fences, no explanation:
 {
