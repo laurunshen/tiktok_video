@@ -65,7 +65,22 @@
       "Bash(echo \"ADC quota project: $\\(gcloud auth application-default print-access-token --verbosity=info 2>&1)",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('quota_project_id:', d.get\\('quota_project_id', '<未设置>'\\)\\)\")",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('quota_project_id:', d.get\\('quota_project_id', '<仍未设置>'\\)\\)\")",
-      "Bash(chmod +x /tmp/poll_job.sh)"
+      "Bash(chmod +x /tmp/poll_job.sh)",
+      "Bash(pip3 install *)",
+      "Bash(python3 -c \"import pandas\")",
+      "Bash(python3)",
+      "Bash(node --check services/db.js)",
+      "Bash(node --check routes/product.js)",
+      "Bash(node --check scripts/import-benchmark-videos.js)",
+      "Bash(node scripts/import-benchmark-videos.js)",
+      "Bash(sqlite3 data/jobs.db \"DELETE FROM reference_videos;\")",
+      "Bash(sqlite3 data/jobs.db \"SELECT COUNT\\(*\\) FROM reference_videos WHERE is_benchmark = 1;\")",
+      "Bash(sqlite3 -header -column data/jobs.db \"SELECT author_username, roi, revenue, cost, source, benchmark_reason FROM reference_videos WHERE is_benchmark=1 AND product_id='1731302299031802096' ORDER BY roi DESC LIMIT 10;\")",
+      "Bash(curl -s \"http://localhost:3001/api/product/benchmark-videos?productId=1731302299031802096&limit=5\")",
+      "Bash(sqlite3 -header -column data/jobs.db \"SELECT author_username, product_id, roi, source FROM reference_videos WHERE is_benchmark=1 LIMIT 10;\")",
+      "Bash(sqlite3 -header -column data/jobs.db \"SELECT author_username, roi, revenue, source FROM reference_videos WHERE is_benchmark=1 AND product_id='1731302299031802096' ORDER BY roi DESC;\")",
+      "Bash(sqlite3 -header -column data/jobs.db \"SELECT source, COUNT\\(*\\) as cnt FROM reference_videos WHERE is_benchmark=1 GROUP BY source;\")",
+      "Bash(curl -s \"http://localhost:3001/api/generate/jobs?limit=10\")"
     ]
   }
 }

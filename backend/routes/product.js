@@ -6,6 +6,7 @@ import path from 'path'
 import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import { uploadFileToKie } from '../services/kieai-upload.js'
+import { getProductCache, saveProduct, listBenchmarkVideos } from '../services/db.js'
 
 const router = express.Router()
 
@@ -177,6 +178,13 @@ router.get('/fetch', async (req, res) => {
   if (!productId) return res.status(400).json({ error: '无法从链接中提取 product_id，请检查链接格式' })
 
   try {
+    // 缓存命中：24 小时内同 productId 直接返回（kie.ai URL 也是稳定的）
+    const cached = getProductCache(productId)
+    if (cached) {
+      console.log(`[Product] 缓存命中 ${productId}: ${cached.name}`)
+      return res.json({ productId, region, productInfo: cached, cached: true })
+    }
+
     const response = await fetchWithRetry(productId, region)
     const productInfo = parseProductInfo(response.data)
     console.log(`[Product] 解析成功: ${productInfo.name}`)
@@ -211,6 +219,9 @@ router.get('/fetch', async (req, res) => {
     productInfo.detailImageUrls = stableUrls.slice(mainCount)
     console.log(`[Product] 稳定 URL 完成：主图 ${productInfo.mainImageUrls.length} + 详情图 ${productInfo.detailImageUrls.length}`)
 
+    // 写入产品缓存（下次同 productId 24h 内直接命中）
+    try { saveProduct(productId, region, productInfo) } catch (e) { console.warn(`[Product] 缓存写入失败: ${e.message}`) }
+
     res.json({ productId, region, productInfo })
 
   } catch (err) {
@@ -226,6 +237,19 @@ router.get('/fetch', async (req, res) => {
       console.error('[Product] 请求失败:', err.message)
       res.status(500).json({ error: err.message })
     }
+  }
+})
+
+// GET /api/product/benchmark-videos?productId=xxx&category=lingerie&limit=10
+// 返回某商品的标杆参考视频列表（按 ROI 降序）
+router.get('/benchmark-videos', (req, res) => {
+  const { productId, category } = req.query
+  const limit = Math.min(parseInt(req.query.limit) || 10, 50)
+  try {
+    const videos = listBenchmarkVideos({ productId, category, limit })
+    res.json({ count: videos.length, videos })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
   }
 })
 

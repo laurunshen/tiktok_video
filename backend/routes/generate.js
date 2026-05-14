@@ -9,6 +9,7 @@ import axios from 'axios'
 import { analyzeAndGeneratePrompt, SEEDANCE_MANDATORY_BLOCKS } from '../services/gemini.js'
 import { validateGeminiOutput, formatValidationReport } from '../services/prompt-validator.js'
 import { reviewPrompt, reviseGeminiOutput, formatReviewReport, clearImageCache } from '../services/gemini-review.js'
+import { saveJob, getJob, listJobs, countJobs, saveVideo } from '../services/db.js'
 import { uploadImagesToKie, uploadFileToKie } from '../services/kieai-upload.js'
 import { createBatchTasks, getTaskStatus, parseTaskResult } from '../services/kieai.js'
 import { getTikTokPlaybackUrl } from '../services/snaptik.js'
@@ -113,6 +114,13 @@ async function ffmpegClip(srcPath, startSec, endSec, outPath) {
   }
 }
 
+// 从 TikTok URL 提取 @用户名（用于后续按达人聚合分析）
+function extractTikTokAuthor(url) {
+  if (!url) return null
+  const m = url.match(/tiktok\.com\/@([\w.\-]+)/)
+  return m ? m[1] : null
+}
+
 const router = express.Router()
 
 // Multer config - save to local uploads folder temporarily
@@ -186,17 +194,26 @@ router.post('/', upload.fields([
     allFiles.push(...productImageFiles)
 
     // 立即建 jobStore 条目，前端轮询时可以拿到实时步骤
+    // 双写：内存（热数据，轮询响应快）+ SQLite（持久化兜底）
     const jobId = `job-${Date.now()}`
     global.jobStore = global.jobStore || {}
     global.jobStore[jobId] = {
       jobId,
       status: 'processing',
-      step: 0,        // 0=上传图片 1=Gemini分析 2=创建任务 3=Seedance生成中
+      step: 0,
       stepLabel: '上传产品图到 kie.ai',
       tasks: [],
       videos: [],
       createdAt: new Date().toISOString(),
+      startedAt: Date.now(),
+      // 元数据：方便后续按产品/参考视频聚合分析
+      productId: productInfo?.productId || (req.body.productId ?? null),
+      referenceVideoUrl: tiktokVideoUrl || null,
+      referenceVideoAuthor: extractTikTokAuthor(tiktokVideoUrl),
+      category, isSameProduct, duration, resolution,
+      batchCount, userDescription,
     }
+    saveJob(global.jobStore[jobId])
 
     res.json({ jobId, status: 'processing', message: 'Job started successfully' })
 
@@ -205,6 +222,7 @@ router.post('/', upload.fields([
       job.step = step
       job.stepLabel = label
       console.log(`[${jobId}] Step ${step}: ${label}`)
+      saveJob(job)
     }
 
     // --- Async processing pipeline ---
@@ -433,6 +451,7 @@ The product appearing in the video MUST be ${dominantColor} ONLY. Reference imag
       console.error(`[${jobId}] Pipeline error:`, err)
       job.status = 'failed'
       job.error = err.message
+      saveJob(job)
     } finally {
       await cleanupFiles(allFiles)
       // 精准清理本任务用过的图片缓存（不影响并发任务）
@@ -451,8 +470,17 @@ The product appearing in the video MUST be ${dominantColor} ONLY. Reference imag
 // GET /api/generate/status/:jobId - poll job status
 router.get('/status/:jobId', async (req, res) => {
   const { jobId } = req.params  // 供日志使用
-  const job = global.jobStore?.[jobId]
-  
+  // 双层查找：内存（热数据）→ SQLite（持久化）
+  let job = global.jobStore?.[jobId]
+  if (!job) {
+    job = getJob(jobId)
+    if (job) {
+      // 从 DB 恢复到内存（这样接下来的轮询又能用热数据）
+      global.jobStore = global.jobStore || {}
+      global.jobStore[jobId] = job
+    }
+  }
+
   if (!job) {
     return res.status(404).json({ error: 'Job not found' })
   }
@@ -495,12 +523,36 @@ router.get('/status/:jobId', async (req, res) => {
     )
     if (allDone) {
       job.status = videos.length > 0 ? 'completed' : 'failed'
+      job.completedAt = Date.now()
+      if (job.startedAt) job.totalMs = job.completedAt - job.startedAt
       if (videos.length > 0) {
         console.log(`[${jobId}] ✅ 所有任务完成，视频数: ${videos.length}`)
         videos.forEach(v => console.log(`[${jobId}]    🎬 ${v.videoUrl}`))
+        // 把每条生成的视频写到 videos 表（便于后续投流数据导入和分析）
+        for (const v of videos) {
+          try {
+            saveVideo({
+              videoId: v.taskId,
+              jobId: job.jobId,
+              videoUrl: v.videoUrl,
+              prompt: job.geminiResult?.seedance_prompt,
+              compressedScript: job.geminiResult?.compressed_script,
+              productVisualFeatures: job.geminiResult?.product_visual_features,
+              selectedImageIndices: job.geminiResult?.selected_image_indices,
+              selectedImageUrls: job.geminiResult?.selected_image_urls,
+              dominantColor: job.geminiResult?.dominant_color,
+              reviewScore: job.reviewReport?.score,
+              reviewPass: job.reviewReport?.pass,
+              reviewIssues: job.reviewReport?.issues,
+            })
+          } catch (e) {
+            console.warn(`[${jobId}] 保存 video 表失败（不阻塞）: ${e.message}`)
+          }
+        }
       } else {
         console.error(`[${jobId}] ❌ 所有任务均失败`)
       }
+      saveJob(job)  // 完成时持久化最终状态
     }
 
     job.taskStatuses = taskStatuses
@@ -526,6 +578,20 @@ router.get('/status/:jobId', async (req, res) => {
     taskCount: job.tasks?.length || 0,
     error: job.error,
   })
+})
+
+// GET /api/generate/jobs?limit=50&offset=0&status=completed - 历史任务列表
+router.get('/jobs', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200)
+  const offset = parseInt(req.query.offset) || 0
+  const status = req.query.status || null
+  try {
+    const jobs = listJobs({ limit, offset, status })
+    const total = countJobs(status)
+    res.json({ total, limit, offset, jobs })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
 })
 
 export default router

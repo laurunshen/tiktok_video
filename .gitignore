@@ -34,3 +34,6 @@ backend/logs/
 # Temporary
 *.tmp
 tmp/
+
+# SQLite database
+backend/data/
