@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment / secrets
+.env
+.env.local
+backend/.env
+frontend/.env
+*.pem
+*.key
+service-account*.json
+
+# Build outputs
+dist/
+build/
+frontend/dist/
+
+# Logs
+*.log
+backend/uploads/
+backend/logs/
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Misc shell brace-expansion accident
+{backend/
+
+# Temporary
+*.tmp
+tmp/
