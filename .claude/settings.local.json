@@ -80,7 +80,8 @@
       "Bash(sqlite3 -header -column data/jobs.db \"SELECT author_username, product_id, roi, source FROM reference_videos WHERE is_benchmark=1 LIMIT 10;\")",
       "Bash(sqlite3 -header -column data/jobs.db \"SELECT author_username, roi, revenue, source FROM reference_videos WHERE is_benchmark=1 AND product_id='1731302299031802096' ORDER BY roi DESC;\")",
       "Bash(sqlite3 -header -column data/jobs.db \"SELECT source, COUNT\\(*\\) as cnt FROM reference_videos WHERE is_benchmark=1 GROUP BY source;\")",
-      "Bash(curl -s \"http://localhost:3001/api/generate/jobs?limit=10\")"
+      "Bash(curl -s \"http://localhost:3001/api/generate/jobs?limit=10\")",
+      "Bash(npx vite *)"
     ]
   }
 }

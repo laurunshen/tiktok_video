@@ -86,9 +86,14 @@ export default function App() {
   const [productUrl, setProductUrl] = useState('')
   const [productRegion, setProductRegion] = useState('SG')
   const [productInfo, setProductInfo] = useState(null)
+  const [productId, setProductId] = useState(null)
   const [fetchingProduct, setFetchingProduct] = useState(false)
   const [productError, setProductError] = useState(null)
   const [isSameProduct, setIsSameProduct] = useState(true)
+  // 标杆参考视频库
+  const [benchmarkVideos, setBenchmarkVideos] = useState([])
+  const [showBenchmarks, setShowBenchmarks] = useState(false)
+  const [loadingBenchmarks, setLoadingBenchmarks] = useState(false)
   const [batchCount, setBatchCount] = useState(1)
   const [resolution, setResolution] = useState('480p')
   const [duration, setDuration] = useState(15)
@@ -220,6 +225,17 @@ export default function App() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || '抓取失败')
       setProductInfo(data.productInfo)
+      setProductId(data.productId)
+      // 自动预取标杆视频（如果该产品有数据）
+      setBenchmarkVideos([])
+      setShowBenchmarks(false)
+      try {
+        const bmRes = await fetch(`${API}/product/benchmark-videos?productId=${data.productId}&limit=10`)
+        if (bmRes.ok) {
+          const bmData = await bmRes.json()
+          if (bmData.videos?.length > 0) setBenchmarkVideos(bmData.videos)
+        }
+      } catch {}
     } catch (e) {
       setProductError(e.message)
     } finally {
@@ -231,7 +247,8 @@ export default function App() {
     stopTimers()
     setRefVideo([]); setImages([]); setDescription('')
     setTiktokVideoUrl('')
-    setProductUrl(''); setProductInfo(null); setProductError(null); setIsSameProduct(true)
+    setProductUrl(''); setProductInfo(null); setProductId(null); setProductError(null); setIsSameProduct(true)
+    setBenchmarkVideos([]); setShowBenchmarks(false)
     setJobId(null); setJobStatus(null); setLoading(false)
     setCurrentStep(-1); setError(null); setWaitSec(0); setCategory('lingerie')
   }
@@ -311,6 +328,78 @@ export default function App() {
               {isSameProduct ? '✅ 脚本直接从视频台词压缩，产品信息作补充' : '🔄 仅学说话风格，台词从产品信息重新生成'}
             </span>
           </div>
+
+          {/* 标杆参考视频库（仅当该产品有真实投流数据时显示） */}
+          {benchmarkVideos.length > 0 && (
+            <div style={{ marginTop: 14, padding: 12, background: 'linear-gradient(135deg, #fef3c7 0%, #fde68a 100%)', borderRadius: 8, border: '1px solid #fbbf24' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
+                onClick={() => setShowBenchmarks(v => !v)}>
+                <div>
+                  <strong style={{ fontSize: 14, color: '#92400e' }}>
+                    ⭐ 平台推荐：{benchmarkVideos.length} 条高 ROI 标杆视频
+                  </strong>
+                  <div style={{ fontSize: 11, color: '#78350f', marginTop: 2 }}>
+                    基于该产品真实投流数据筛选（ROI &gt; 3 或 GMV &gt; $5000），最高 ROI {benchmarkVideos[0].roi?.toFixed(1) || '-'}
+                  </div>
+                </div>
+                <span style={{ fontSize: 18, color: '#78350f' }}>{showBenchmarks ? '▼' : '▶'}</span>
+              </div>
+              {showBenchmarks && (
+                <div style={{ marginTop: 12, display: 'grid', gap: 8, maxHeight: 360, overflowY: 'auto' }}>
+                  {benchmarkVideos.map((bv, i) => {
+                    const isSelected = tiktokVideoUrl === bv.video_url
+                    return (
+                      <div key={bv.video_id}
+                        style={{
+                          padding: 10, background: isSelected ? '#fef3c7' : '#fff',
+                          border: isSelected ? '2px solid #f59e0b' : '1px solid #e5e7eb',
+                          borderRadius: 6, transition: 'all 0.15s',
+                        }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: 13, fontWeight: 600, color: '#1f2937' }}>#{i + 1} @{bv.author_username}</span>
+                              {bv.roi != null && (
+                                <span style={{ fontSize: 11, padding: '2px 6px', background: bv.roi > 10 ? '#10b981' : '#3b82f6', color: '#fff', borderRadius: 3 }}>
+                                  ROI {bv.roi.toFixed(2)}
+                                </span>
+                              )}
+                              {bv.revenue != null && (
+                                <span style={{ fontSize: 11, color: '#059669' }}>收入 ${bv.revenue.toFixed(0)}</span>
+                              )}
+                              {bv.play_6s_rate != null && (
+                                <span style={{ fontSize: 11, color: '#6b7280' }}>6s播放率 {(bv.play_6s_rate * 100).toFixed(1)}%</span>
+                              )}
+                              {bv.cvr != null && bv.cvr > 0 && (
+                                <span style={{ fontSize: 11, color: '#6b7280' }}>转化 {(bv.cvr * 100).toFixed(1)}%</span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: 12, color: '#4b5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {bv.title || '(无标题)'}
+                            </div>
+                            <a href={bv.video_url} target="_blank" rel="noreferrer"
+                              style={{ fontSize: 11, color: '#6366f1', textDecoration: 'none' }}>
+                              🔗 在 TikTok 查看 →
+                            </a>
+                          </div>
+                          <button
+                            onClick={() => { setTiktokVideoUrl(bv.video_url); setRefVideo([]) }}
+                            style={{
+                              padding: '6px 12px', fontSize: 12, border: 'none', borderRadius: 5,
+                              cursor: 'pointer', flexShrink: 0,
+                              background: isSelected ? '#10b981' : '#f59e0b',
+                              color: '#fff', fontWeight: 600,
+                            }}>
+                            {isSelected ? '✓ 已选' : '用这条'}
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* 产品图 */}
