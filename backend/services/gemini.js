@@ -911,7 +911,8 @@ Based on product images: <note key visible details — fabric color, texture, st
 
 [PRESENTER]
 Real everyday person, NOT a model or influencer.
-<Fill in: age range, body type, hair color/length casually styled, skin tone with natural features — visible pores, possible freckles, natural texture. NOT "flawless".>
+<Fill in: age range, body type, skin tone with natural features — visible pores, possible freckles, natural texture. NOT "flawless".>
+HAIR — IMPORTANT: hair must be PULLED AWAY from the chest area to keep the bra straps and neckline fully visible. Use one of: high ponytail / low ponytail / messy bun / topknot / hair clipped back / hair tucked securely behind both shoulders. NEVER "long loose hair" / "long hair flowing over chest" / "long hair down" — loose long hair occluding the chest causes severe AI rendering artifacts (flickering between hair and straps, melting hair-on-fabric textures, distorted neckline geometry).
 Warm, relaxed energy. Talks fast like she's sharing a secret with a friend.
 
 OUTFIT — two looks, alternating via clean cuts:
@@ -924,9 +925,20 @@ Every shot = a real person doing something. No static images. No product-on-whit
 
 WORD BUDGET: total dialogue ≤ ${Math.round(targetDuration * 2.8)} words. Distribute the compressed_script across these shots, never exceeding the per-shot time × 2.8 words limit. Leave the last 1-2 seconds SILENT or with a gesture/smile.
 
+ACTION SAFETY — Seedance has known weaknesses with complex 3D intersections. NEVER write actions that involve:
+  • Fingers slipping UNDER tight clothing (e.g. "slides finger under the underwire", "tucks fingers behind the band") — causes hand-into-fabric distortion
+  • Hands clipping THROUGH straps or band — causes melted/floating finger artifacts
+  • Hair flowing over hands or product — causes hair-fabric merging
+ALWAYS prefer SURFACE-ONLY interactions:
+  ✅ "she traces the OUTSIDE of the underwire channel with her fingertip"
+  ✅ "she runs her palm flat along the band, on top of the fabric"
+  ✅ "she pinches the strap between two fingers and gently lifts it"
+  ✅ "she turns sideways showing the silhouette"
+  ❌ "she slides a finger under the underwire" / "tucks fingers behind the strap"
+
 [0–Xs] LOOK A. Medium close-up — she faces camera, talks fast. Says: "<part 1 of compressed_script>"
-[Xs–Ys] LOOK B. She adjusts/demonstrates the product directly on her body — <specific action from product images: e.g. "she slides a finger under the underwire showing it sits completely flat", "she turns sideways showing the silhouette", "she pulls the band away from her torso then releases it snapping back">. Fast voiceover: "<part 2 of compressed_script>"
-[Ys–Zs] LOOK B close-up. Hands demonstrate a specific product component — <e.g. "she pinches and stretches the bra strap showing elasticity and snap-back", "she traces the seamless edge along her ribcage">. Action is on the actual product, NOT on outer clothing. Voiceover: "<part 3 of compressed_script>"
+[Xs–Ys] LOOK B. She demonstrates the product on her body — <specific SURFACE-ONLY action: e.g. "she runs her palm flat along the band on top of the fabric", "she turns sideways showing the silhouette", "she pinches the strap between two fingers and lifts gently">. Fast voiceover: "<part 2 of compressed_script>"
+[Ys–Zs] LOOK B close-up. Hands demonstrate a specific product component using SURFACE-ONLY interaction — <e.g. "she pinches and stretches the bra strap showing elasticity and snap-back", "she traces the OUTSIDE of the seamless edge along her ribcage with one fingertip">. Action is on the actual product surface, NOT under it. Voiceover: "<part 3 of compressed_script>"
 [Zs–${targetDuration}s] LOOK A. She smiles at camera. Says quickly: "<SHORT closing — max 6 words. Must finish with 1s to spare.>"
 
 [STYLE]
@@ -950,7 +962,11 @@ NOT a broadcaster voice.
 
 [AVOID]
 No static images in video. No shots without a person. No gimbal. No harsh one-sided lighting. No airbrushed skin. No model poses. No slow delivery. No invented lines. No @Image references in video content.
-PRODUCT ACCURACY — <write 1-2 plain declarative sentences describing exactly what visual features must NOT appear, based on this product's actual anchor values. Examples: "Do not show visible stitched trim, folded hems, or thick bound edges on the cups." (when this product has laser-cut edges) / "Do not show a prominent underwire ridge or thick channel seam." (when this product has invisible underwire). DO NOT write "if anchor says X then..." — resolve it based on this product and state the bans as plain facts.>
+PRODUCT ACCURACY — <write 1-2 plain declarative sentences listing what visual features must NOT appear. CRITICAL CONSISTENCY RULE: Only ban features this product DOES NOT HAVE. NEVER ban a feature that PRODUCT VISUAL ANCHOR / product_visual_features says this product DOES have — that creates a self-contradiction that confuses the model. Examples (resolved by product):
+  • For a product with laser-cut edges: "Do not show visible stitched trim, folded hems, or thick bound edges on the cups."
+  • For a product with stitched/folded hems: "Do not show raw unfinished edges or harsh laser-cut lines." (do NOT ban stitching here — this product has stitching)
+  • For a product with invisible underwire: "Do not show a prominent underwire ridge or thick channel seam."
+Cross-check the AVOID list against the ANCHOR before finalizing — if any banned feature is also listed in the ANCHOR as present, REMOVE it from AVOID.>
 PRODUCT INTEGRITY — when the product is shown held in hand or off-body, it must still match the PRODUCT VISUAL ANCHOR exactly: straps in correct positions, closure on the BACK only (never on the front of a back-closure bra), cup count and shape matching the anchor. Do NOT generate distorted, mirror-flipped, or structurally incorrect versions of the product.
 ---`
 
@@ -982,7 +998,8 @@ Based on product images: <note key visible details — shape, color, material, k
 
 [PRESENTER]
 Real everyday person, NOT a model or influencer.
-<Fill in: age range, body type, hair color/length casually styled, skin tone with natural features — visible pores, possible freckles. NOT "flawless".>
+<Fill in: age range, body type, skin tone with natural features — visible pores, possible freckles. NOT "flawless".>
+HAIR — IMPORTANT: hair must be PULLED AWAY from any area where the product is held, applied, or demonstrated. Use one of: high ponytail / low ponytail / messy bun / topknot / hair clipped back / hair tucked securely behind both shoulders. NEVER "long loose hair flowing over hands or product" — hair near hands or interacting with the product causes severe AI rendering artifacts (hair-fabric merging, melted finger textures).
 Warm, relaxed energy. Talks fast like sharing a discovery with a friend.
 Clothing: casual everyday wear appropriate for demonstrating this type of product at home.
 
@@ -991,9 +1008,14 @@ Every shot = a real person doing something. No static images. No product-on-whit
 
 WORD BUDGET: total dialogue ≤ ${Math.round(targetDuration * 2.8)} words. Distribute the compressed_script across these shots. Leave the last 1-2 seconds SILENT.
 
+ACTION SAFETY — Seedance has known weaknesses with complex 3D intersections. PREFER SURFACE-ONLY interactions whenever possible:
+  ✅ Holding the product, pressing buttons on its surface, gesturing toward it, applying it to skin in simple strokes
+  ❌ Fingers slipping inside small openings, hands clipping through gaps, tools operating at extreme angles
+When unsure, choose the simpler interaction — Seedance handles "hand holds object" reliably but struggles with "fingers manipulate small parts inside object".
+
 [0–Xs] Medium close-up — faces camera, talks fast. Says: "<part 1 of compressed_script>"
-[Xs–Ys] Presenter actively uses/demonstrates the product — <specific action based on product type>. Fast voiceover: "<part 2 of compressed_script>"
-[Ys–Zs] Close-up on hands/product interaction showing a specific feature — <specific demo>. Voiceover: "<part 3 of compressed_script>"
+[Xs–Ys] Presenter actively uses/demonstrates the product — <specific SURFACE-LEVEL action based on product type>. Fast voiceover: "<part 2 of compressed_script>"
+[Ys–Zs] Close-up on hands/product interaction showing a specific feature — <specific demo, prefer surface-level>. Voiceover: "<part 3 of compressed_script>"
 [Zs–${targetDuration}s] She looks at camera, smiles. Says quickly: "<SHORT closing — max 6 words.>"
 
 [STYLE]
@@ -1019,6 +1041,7 @@ NOT a broadcaster voice.
 No static images in video. No shots without a person. No gimbal. No harsh lighting. No airbrushed skin. No model poses. No slow delivery. No invented lines. No @Image references in video content.
 PRODUCT ACCURACY — never substitute a generic version of this product type. The product shown must match the PRODUCT VISUAL ANCHOR in every frame.
 PRODUCT INTEGRITY — when the product is shown held in hand or off-body, it must still match the PRODUCT VISUAL ANCHOR exactly. Do NOT generate distorted or structurally incorrect versions of the product.
+CONSISTENCY: Cross-check the AVOID list against the ANCHOR before finalizing — if any banned feature is also listed in the ANCHOR as present (e.g. "no buttons" but ANCHOR says product has buttons), REMOVE it from AVOID. Self-contradicting rules confuse the model.
 ---`
 
   const task3 = category === 'lingerie' ? task3Lingerie : task3General
