@@ -416,19 +416,24 @@ router.post('/', upload.fields([
 
       // Color Lock 兜底：根据 Pass 1 选定的 dominant_color 动态生成块，强制 Seedance 锁定单一颜色
       const dominantColor = geminiResult.dominant_color || geminiResult.product_visual_features?.color
-      const colorLockBlock = dominantColor ? `
-[COLOR LOCK — HARD CONSTRAINT, applies to every frame]
-The product appearing in the video MUST be ${dominantColor} ONLY. Reference images may include other color SKU variants (black, white, nude, etc.) — those are provided ONLY for structural reference (back closure, strap layout, hardware). DO NOT mix colors. The bra worn by the presenter throughout the entire video is ${dominantColor}. If any frame would render the bra in a different color, REGENERATE that frame in ${dominantColor}.
-` : ''
+      const colorLockBlock = dominantColor
+        ? `[COLOR LOCK] Bra is ${dominantColor} in EVERY frame. Reference images of other colors are structure-only — DO NOT render those colors.`
+        : ''
 
-      const allBlocks = SEEDANCE_MANDATORY_BLOCKS + (colorLockBlock ? '\n\n' + colorLockBlock.trim() : '')
+      // 产品锚点末尾摘要：把 PRODUCT VISUAL ANCHOR 关键字段在 prompt 末尾再说一次，
+      // 防止长 prompt 中间被淹没（首尾呼应是 LLM/视频模型对长 prompt 最有效的结构）
+      const features = geminiResult.product_visual_features || {}
+      const featuresSummary = features.silhouette || features.color || features.edge_finish ? `[PRODUCT REMINDER — repeat of the visual anchor at top, do NOT ignore]
+The bra in the video has: ${features.silhouette || ''}${features.structure ? ', ' + features.structure : ''}${features.edge_finish ? ', ' + features.edge_finish : ''}${features.fabric_visual ? ', ' + features.fabric_visual : ''}${features.color ? ', color: ' + features.color : ''}.${features.distinguishing_details ? ' Distinguishing: ' + features.distinguishing_details + '.' : ''}` : ''
+
+      const allBlocks = [SEEDANCE_MANDATORY_BLOCKS, colorLockBlock, featuresSummary].filter(Boolean).join('\n\n')
       const lastDashIdx = rawPrompt.lastIndexOf('\n---')
       const finalPrompt = lastDashIdx > -1
         ? rawPrompt.slice(0, lastDashIdx) + '\n\n' + allBlocks + '\n' + rawPrompt.slice(lastDashIdx)
         : rawPrompt + '\n\n' + allBlocks
       geminiResult.seedance_prompt = finalPrompt
-      const blockCount = 8 + (dominantColor ? 1 : 0)  // FACE/REF/ANATOMY/NO-TEXT/NO-IMPROV/BODY/CHARACTER/AUDIO + 可选 COLOR LOCK
-      console.log(`[${jobId}] 已注入 ${blockCount} 个 MANDATORY 指令块${dominantColor ? `（含 COLOR LOCK = ${dominantColor}）` : ''}，prompt 总长 ${finalPrompt.length} 字符`)
+      const blockCount = 7 + (dominantColor ? 1 : 0) + (featuresSummary ? 1 : 0)  // 7 mandatory + 可选 COLOR LOCK + 可选 PRODUCT REMINDER
+      console.log(`[${jobId}] 已注入 ${blockCount} 个块${dominantColor ? `（含 COLOR LOCK = ${dominantColor}）` : ''}，prompt 总长 ${finalPrompt.length} 字符`)
 
       setStep(2, `创建 ${batchCount} 个 Seedance 生成任务`)
       const tasks = await createBatchTasks({

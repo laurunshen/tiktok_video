@@ -18,47 +18,29 @@ const GEMINI_IMAGE_MAX_BYTES = 1 * 1024 * 1024
 
 // 强制注入 Seedance prompt 的固定指令块。Gemini 在长 prompt 里会偷偷压缩这些规则，
 // 所以由 generate.js 拿到 Gemini 输出后用代码硬拼接，保证 100% 进入 Seedance prompt。
+// 强制注入到 prompt 末尾的硬性约束块。按重要性从高到低排列。
+// 设计原则：每块只保留 1-2 句最关键命令，避免稀释 PRODUCT VISUAL ANCHOR 的注意力。
 export const SEEDANCE_MANDATORY_BLOCKS = `
-[FACE & LIKENESS — HARD CONSTRAINT]
-The presenter's face must be a completely original AI-generated face. Seedance MUST NOT use the person from the reference video as the presenter. Treat the reference video purely as a STYLE and ENERGY guide — the actor in it is NOT the actor in the output. The output presenter must have visibly different facial features (different face shape, different eye shape, different nose, different lips), and ideally different hair color and skin tone from the reference person. This is a hard constraint, not a preference.
+[CHARACTER CONSISTENCY — TOP PRIORITY]
+ONE PERSON only across the entire video. Same face, same hair, same makeup, same skin tone, same body in every shot — both LOOK A and LOOK B. The ONLY allowed change between shots is the cardigan being on or off (and body angle / hand position). NEVER swap to a different-looking woman.
 
-[REFERENCE VIDEO USAGE — STRICT BOUNDARY]
-The attached reference video is provided ONLY as a guide for: camera movement (handheld shake pattern, framing rhythm), lighting style (window light angle, soft natural shadows), pacing (cut frequency, energy), and the presenter's body language and gesture style.
-DO NOT copy from the reference video: the presenter's face, body, or any identifying features; any objects, accessories, or items attached to the presenter's body (microphones, badges, lanyards, jewelry, logos, tags, lapel mics, dark spots on clothing); background props, room layout, or specific environment details; clothing items the reference person is wearing.
-If the reference video contains anything attached to the person (lapel mic, clip, badge, dark spot, sticker), DO NOT replicate it. The output presenter wears ONLY what is described in [OUTFIT] / [PRESENTER] — nothing else attached to the body or clothing.
-DO NOT copy from the reference video's AUDIO TRACK: outdoor wind noise, traffic sounds, music, background voices, room reverb, echo, or any environmental ambience. The reference video's audio is for understanding the speaker's PACE and TONE only — the OUTPUT video's audio environment is defined by [AUDIO ENVIRONMENT] below, not by the reference.
-DO NOT copy from the reference video's ON-SCREEN ELEMENTS: any text overlays, sticker captions, lyric subtitles, brand names, hashtags, watermarks, TikTok UI elements, or product callout text that appear in the reference video frame. Even if the reference video heavily features text overlays, the OUTPUT video must be 100% TEXT-FREE.
+[NO ON-SCREEN TEXT — TOP PRIORITY]
+ZERO text in any frame: no subtitles, captions, watermarks, brand text, product names, or characters. Reference images may contain marketing text overlays ("Inbarely Plus Collection", "Double Layer Fabric", etc.) — IGNORE that text completely; the bra itself is clean and unmarked. Output must be LIVE-ACTION video of a person, NOT a slideshow stitching the reference photos.
+
+[FACE & LIKENESS]
+The presenter is a completely original AI-generated face — NOT the person in the reference video. Different face shape, different eyes, different nose.
+
+[REFERENCE VIDEO BOUNDARY]
+Use the reference video ONLY for camera shake, pacing, and gesture style. DO NOT copy from it: face, accessories on body, on-screen text/captions/stickers, audio ambience.
+
+[AUDIO ENVIRONMENT]
+INDOOR residential setting. Clean voice + very soft room tone only. NO outdoor wind, traffic, music, echo, or background noise. If reference was filmed outdoors, ignore that ambience.
 
 [ANATOMICAL ACCURACY]
-Hands must have exactly 5 fingers each, in natural anatomical positions. No extra digits, no fused fingers, no missing fingers, no impossible joint angles, no rubber-like distortions. If a hand cannot be rendered correctly in a given shot, keep it OUT OF FRAME instead of generating a deformed hand. Same rule for feet, eyes, and ears.
-
-[NO ON-SCREEN TEXT — HARD CONSTRAINT, READ CAREFULLY]
-ABSOLUTELY ZERO text in any frame of the output video. This includes: subtitles, captions, burned-in text, lyric overlays, watermarks, on-screen labels, brand text, product names, marketing copy, hashtags, TikTok UI elements, sticker text, or ANY visible characters/letters/numbers.
-CRITICAL — TEXT IN REFERENCE IMAGES IS METADATA, NOT DESIGN: The reference product images may include marketing posters with text such as "Inbarely Plus Collection", "Double Layer Fabric", "You'll Fall in Love With...", product feature callouts, or brand watermarks. THIS TEXT IS NOT PART OF THE PRODUCT. Do NOT render any of this text in the output video. The product itself (the bra) has NO printed text on it — treat the bra as a clean, unmarked garment.
-CRITICAL — DO NOT TURN REFERENCE IMAGES INTO SLIDESHOW: The reference images are for FEATURE GUIDANCE (color, shape, edge, fit) only. They are NOT video keyframes to be inserted as slides. The output must be CONTINUOUS LIVE-ACTION VIDEO of a person performing actions, NOT a montage of the static reference photos. NEVER directly composite or stitch the reference images into the output video frames.
-Suppress any default tendency to add captions or auto-generated subtitles.
+Hands have exactly 5 fingers in natural positions. No fused/extra/missing fingers. If a hand can't be rendered correctly, keep it out of frame.
 
 [NO IMPROVISED DIALOGUE]
-The presenter speaks ONLY the exact lines written in [SHOT SEQUENCE]. Do NOT add any improvised lines such as "link in bio", "link down below", "okay bye", "thanks for watching", "follow me", "comment below", "check it out", or any closing CTAs that are not explicitly in the shot sequence script. When the scripted lines end before the video does, fill the remaining time with the presenter smiling silently, adjusting hair, or looking at camera — NO additional speech.
-
-[BODY ATTACHMENT BAN]
-No microphones, lapel mics, clip-on mics, recording devices, name tags, badges, lanyards, brooches, pins, stickers, or unexplained dark spots/objects on the presenter's chest, shoulders, neck, or clothing. The presenter's torso area is CLEAN — only the product and the optional cardigan from [OUTFIT] are present.
-
-[CHARACTER CONSISTENCY — HARD CONSTRAINT, applies across every cut and every shot]
-There is ONLY ONE PERSON in this entire video. The same woman appears in every shot — every LOOK A, every LOOK B, every cut. Across the entire video she has: the same face, same eye shape, same nose, same mouth, same skin tone, same hair color, same hair style, same body proportions, same makeup, same accessories.
-NEVER generate two different-looking women that swap between shots. NEVER change face, makeup, jewelry, hair, or body across cuts.
-If a shot transition would normally cause Seedance to re-sample a new person (e.g. cardigan on/off, different angle, different action), STILL render the SAME woman — only the action/angle/clothing-layer changes.
-The ONLY allowed visual change between shots is: (a) cardigan layer present or removed, (b) body angle/pose, (c) hand positions. EVERYTHING ELSE about the person is locked.
-NEVER add or remove jewelry between shots. NEVER change lipstick color or shade between shots. NEVER change hairstyle between shots.
-
-[AUDIO ENVIRONMENT — HARD CONSTRAINT]
-The output video must be filmed INDOORS in a quiet, residential environment. Audio must be clean and quiet:
-  • Setting: indoor bedroom, living room, or bathroom — NEVER outdoors, NEVER on a balcony, NEVER near a window with traffic noise
-  • NO outdoor wind noise, NO traffic sounds, NO car horns, NO street ambience, NO music playing in the background, NO construction noise, NO bird/animal sounds
-  • NO room reverb, NO echo, NO hollow large-room acoustics — the room sounds intimately small (like a normal home interior)
-  • NO background voices, NO TV/radio playing
-  • The ONLY audio in the video is: the presenter's voice (clean, close-mic'd) + very soft natural room tone
-  • If the reference video was filmed outdoors with wind noise, IGNORE that audio environment completely — the output's audio is determined by THIS specification, not the reference.
+The presenter speaks ONLY the exact lines in SHOT SEQUENCE. NO "link in bio", "okay bye", "thanks for watching" or other ad-libbed closers.
 `.trim()
 
 async function imageToInlinePart(filePath, originalName) {
@@ -790,10 +772,13 @@ The product likely has multiple color variants in the images (e.g. beige, black,
   • If multiple colors appear equally, pick the most photogenic neutral (beige > nude > white > black)
   • Output this single color name in the dominant_color field below
 
-STEP 2.2 — Select 5-9 images using these priority rules:
-  • PRIORITIZE: images showing the DOMINANT color in hero/overview/on-body/close-up shots
-  • ACCEPT (with caution): non-dominant-color images ONLY when they show structural information (e.g. back closure, strap placement) that NO dominant-color image covers, AND mark them in image_color_role as "structure-only-different-color"
-  • Each selected image gets a role label in image_color_role: either "dominant-color" or "structure-only-different-color"
+STEP 2.2 — Select 5-9 images with STRONG color bias toward dominant_color:
+  • PREFER dominant_color images. Aim for 6-8 dominant-color images.
+  • At MOST 1 non-dominant-color image, AND only if it shows a critical structural angle (e.g. back closure) that no dominant-color image covers. If all critical angles ARE covered by dominant-color images, do NOT include any non-dominant-color image.
+  • IGNORE images that are mainly a marketing poster with large text overlays (e.g. "Inbarely Plus Collection" headline, "Double Layer Fabric" callout) — those text elements pollute the video model. Only include them if they are the ONLY way to show a critical product detail.
+  • Each selected image gets a role label in image_color_role: either "dominant-color" or "structure-only-different-color".
+
+WHY THIS MATTERS: The video model is visual-first — if you include a black-color image to show "structural reference only", the model will sometimes render the bra in black anyway. Color bias in image selection is the strongest defense against color contamination.
 
 Return indices (1-based) and the role array. Pass 2 will only see selected images.
 
@@ -939,14 +924,8 @@ Color: <copy verbatim from product_visual_features.color>
 Distinguishing details: <copy verbatim from product_visual_features.distinguishing_details>
 Required visual outcome: <write 1-3 plain declarative sentences describing — based on the actual edge_finish/underwire_profile/fabric_drape values for THIS product — what the cups, band edges, and underwire should literally look like in the video. Examples: "Cups have flat laser-cut edges with no visible stitching or folded trim." / "Underwire sits inside an invisible channel with no raised ridge." / "Fabric drapes as a second skin, cup edges flush against the body." DO NOT write conditional logic. Resolve the conditions yourself based on this product's anchor values and write the final outcome as plain statements. Video models ignore if/then logic and will blend all keywords from both branches, causing hallucinations.>
 
-[COLOR LOCK — CRITICAL, applies to every frame and every shot]
-The product in the generated video MUST appear in <DOMINANT_COLOR> ONLY. Reference images may show multiple color SKUs (variant images for the listing) — IGNORE all colors except <DOMINANT_COLOR>. Specifically:
-  • Any reference image showing a different color (black/white/nude/etc.) is included ONLY for STRUCTURAL information (back closure, strap layout, hardware) — DO NOT copy its color into the video
-  • The bra worn by the presenter throughout LOOK A and LOOK B must be <DOMINANT_COLOR>
-  • The presenter's [OUTFIT] description must explicitly say "<DOMINANT_COLOR> bra"
-  • In the [SHOT SEQUENCE], every shot describing the bra must mention "<DOMINANT_COLOR>" at least once across the sequence
-  • In the [OPENING LINE], the color must appear
-Treat <DOMINANT_COLOR> as a hard lock. If you (the prompt writer) feel tempted to write "any color" or "<color1> or <color2>" — STOP and use <DOMINANT_COLOR> only.
+[COLOR — only <DOMINANT_COLOR>]
+The bra is <DOMINANT_COLOR> in every frame. OUTFIT must say "<DOMINANT_COLOR> bra"; OPENING LINE must include the color; mention "<DOMINANT_COLOR>" in SHOT SEQUENCE at least 2 more times. NEVER write "any color" or alternate color names.
 
 [PRODUCT NOTES - internal only, do NOT speak or display these words in video]
 Based on product images: <note key visible details — fabric color, texture, strap style, clasp type, construction>. Use to write accurate action descriptions only.
@@ -965,13 +944,9 @@ MAKEUP & ACCESSORIES — to ensure character consistency between shots, the pres
   • Same skin tone, same face shape, same body proportions in every frame
 Warm, relaxed energy. Talks fast like she's sharing a secret with a friend.
 
-[CHARACTER CONSISTENCY — HARD CONSTRAINT, applies to every cut]
-The person in LOOK A and the person in LOOK B is THE EXACT SAME WOMAN — same face, same eyes, same nose, same mouth, same skin tone, same hair, same makeup, same body, same age. The ONLY visual difference between LOOK A and LOOK B is whether the open cardigan is worn or not. NEVER generate two different-looking people across the cuts. NEVER change face, hair, makeup, accessories, or body type between shots. If LOOK A shows a woman with a high ponytail and bare neck, LOOK B must show the SAME woman with the SAME high ponytail and SAME bare neck — only the cardigan is removed.
-
-OUTFIT — two looks of THE SAME PERSON, alternating via clean cuts:
-- LOOK A (talking shots): wears the Warm Beige bra WITH an open casual cardigan layered over it. Relaxed at-home feel. Bra straps and partial cup visible through the open cardigan.
-- LOOK B (product demo shots): SAME PERSON, SAME hair, SAME makeup, SAME bare neck — just with the cardigan removed (off-shoulder or behind), so the bra is fully visible. Shows fit, silhouette, strap placement, fabric on skin.
-Cuts between LOOK A ↔ LOOK B = same woman, cardigan added/removed only. Do NOT attempt in-frame undressing.
+OUTFIT — two looks of THE SAME PERSON (cardigan on/off only):
+- LOOK A: wears the bra WITH an open casual cardigan layered over it.
+- LOOK B: SAME PERSON, SAME hair, SAME makeup, SAME bare neck — cardigan removed, bra fully visible.
 
 [SHOT SEQUENCE]
 Every shot = a real person doing something. No static images. No product-on-white-background shots.
