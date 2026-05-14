@@ -26,18 +26,32 @@ The presenter's face must be a completely original AI-generated face. Seedance M
 The attached reference video is provided ONLY as a guide for: camera movement (handheld shake pattern, framing rhythm), lighting style (window light angle, soft natural shadows), pacing (cut frequency, energy), and the presenter's body language and gesture style.
 DO NOT copy from the reference video: the presenter's face, body, or any identifying features; any objects, accessories, or items attached to the presenter's body (microphones, badges, lanyards, jewelry, logos, tags, lapel mics, dark spots on clothing); background props, room layout, or specific environment details; clothing items the reference person is wearing.
 If the reference video contains anything attached to the person (lapel mic, clip, badge, dark spot, sticker), DO NOT replicate it. The output presenter wears ONLY what is described in [OUTFIT] / [PRESENTER] — nothing else attached to the body or clothing.
+DO NOT copy from the reference video's AUDIO TRACK: outdoor wind noise, traffic sounds, music, background voices, room reverb, echo, or any environmental ambience. The reference video's audio is for understanding the speaker's PACE and TONE only — the OUTPUT video's audio environment is defined by [AUDIO ENVIRONMENT] below, not by the reference.
+DO NOT copy from the reference video's ON-SCREEN ELEMENTS: any text overlays, sticker captions, lyric subtitles, brand names, hashtags, watermarks, TikTok UI elements, or product callout text that appear in the reference video frame. Even if the reference video heavily features text overlays, the OUTPUT video must be 100% TEXT-FREE.
 
 [ANATOMICAL ACCURACY]
 Hands must have exactly 5 fingers each, in natural anatomical positions. No extra digits, no fused fingers, no missing fingers, no impossible joint angles, no rubber-like distortions. If a hand cannot be rendered correctly in a given shot, keep it OUT OF FRAME instead of generating a deformed hand. Same rule for feet, eyes, and ears.
 
-[NO ON-SCREEN TEXT]
-ABSOLUTELY NO subtitles, captions, burned-in text, lyric overlays, watermarks, on-screen labels, brand text, or any kind of text appearing in the video frame. This is a clean visual UGC video — only the spoken audio carries the words. Suppress any default tendency to add captions or auto-generated subtitles.
+[NO ON-SCREEN TEXT — HARD CONSTRAINT, READ CAREFULLY]
+ABSOLUTELY ZERO text in any frame of the output video. This includes: subtitles, captions, burned-in text, lyric overlays, watermarks, on-screen labels, brand text, product names, marketing copy, hashtags, TikTok UI elements, sticker text, or ANY visible characters/letters/numbers.
+CRITICAL — TEXT IN REFERENCE IMAGES IS METADATA, NOT DESIGN: The reference product images may include marketing posters with text such as "Inbarely Plus Collection", "Double Layer Fabric", "You'll Fall in Love With...", product feature callouts, or brand watermarks. THIS TEXT IS NOT PART OF THE PRODUCT. Do NOT render any of this text in the output video. The product itself (the bra) has NO printed text on it — treat the bra as a clean, unmarked garment.
+CRITICAL — DO NOT TURN REFERENCE IMAGES INTO SLIDESHOW: The reference images are for FEATURE GUIDANCE (color, shape, edge, fit) only. They are NOT video keyframes to be inserted as slides. The output must be CONTINUOUS LIVE-ACTION VIDEO of a person performing actions, NOT a montage of the static reference photos. NEVER directly composite or stitch the reference images into the output video frames.
+Suppress any default tendency to add captions or auto-generated subtitles.
 
 [NO IMPROVISED DIALOGUE]
 The presenter speaks ONLY the exact lines written in [SHOT SEQUENCE]. Do NOT add any improvised lines such as "link in bio", "link down below", "okay bye", "thanks for watching", "follow me", "comment below", "check it out", or any closing CTAs that are not explicitly in the shot sequence script. When the scripted lines end before the video does, fill the remaining time with the presenter smiling silently, adjusting hair, or looking at camera — NO additional speech.
 
 [BODY ATTACHMENT BAN]
 No microphones, lapel mics, clip-on mics, recording devices, name tags, badges, lanyards, brooches, pins, stickers, or unexplained dark spots/objects on the presenter's chest, shoulders, neck, or clothing. The presenter's torso area is CLEAN — only the product and the optional cardigan from [OUTFIT] are present.
+
+[AUDIO ENVIRONMENT — HARD CONSTRAINT]
+The output video must be filmed INDOORS in a quiet, residential environment. Audio must be clean and quiet:
+  • Setting: indoor bedroom, living room, or bathroom — NEVER outdoors, NEVER on a balcony, NEVER near a window with traffic noise
+  • NO outdoor wind noise, NO traffic sounds, NO car horns, NO street ambience, NO music playing in the background, NO construction noise, NO bird/animal sounds
+  • NO room reverb, NO echo, NO hollow large-room acoustics — the room sounds intimately small (like a normal home interior)
+  • NO background voices, NO TV/radio playing
+  • The ONLY audio in the video is: the presenter's voice (clean, close-mic'd) + very soft natural room tone
+  • If the reference video was filmed outdoors with wind noise, IGNORE that audio environment completely — the output's audio is determined by THIS specification, not the reference.
 `.trim()
 
 async function imageToInlinePart(filePath, originalName) {
@@ -314,6 +328,7 @@ Key requirements:
 Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.
 Lighting: Soft directional window light, warm and diffused, from a nearby window at a gentle angle. Creates a SOFT natural shadow — subtle and gradual, NOT a harsh stark black shadow. Like overcast daylight through sheer curtains. Skin looks warm and dimensional. NOT ring light, NOT studio strobe, NOT sharp spotlight.
 Background: Lived-in home — bedroom, living room, or bathroom. Slightly cluttered. NOT a studio backdrop.
+Audio environment: INDOOR ONLY — quiet residential interior. Clean voice + very soft room tone. NO outdoor wind, NO traffic, NO street noise, NO music, NO echo. If reference video was filmed outside, ignore that ambience.
 Color grade: Slightly desaturated, warm, matte/flat like an iPhone without filters. Low sharpening. NOT vivid or cinematic.
 Aspect ratio: 9:16 vertical.
 
@@ -395,6 +410,7 @@ Key requirements:
 Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.
 Lighting: Soft directional window light, warm and diffused. Creates a subtle soft shadow — NOT harsh or stark. Like overcast daylight through sheer curtains. NOT ring light, NOT studio strobe.
 Background: Lived-in home — kitchen counter, bathroom shelf, living room couch. Slightly cluttered. NOT a studio backdrop.
+Audio environment: INDOOR ONLY — quiet residential interior. Clean voice + very soft room tone. NO outdoor wind, NO traffic, NO street noise, NO music, NO echo. If reference video was filmed outside, ignore that ambience.
 Color grade: Slightly desaturated, warm, matte/flat like an iPhone without filters. Low sharpening. NOT vivid or cinematic.
 Aspect ratio: 9:16 vertical.
 
@@ -977,6 +993,7 @@ ANTI-LOOPING RULE — Seedance has a documented "boomerang effect": when two con
 Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.
 Lighting: Soft directional window light, warm and diffused, from a nearby window at a gentle angle. Creates a SOFT natural shadow — subtle and gradual, NOT a harsh stark black shadow. Like overcast daylight through sheer curtains. Skin looks warm and dimensional. NOT ring light, NOT studio strobe, NOT sharp spotlight.
 Background: Lived-in home — bedroom, living room, or bathroom. Slightly cluttered. NOT a studio backdrop.
+Audio environment: INDOOR ONLY — quiet residential interior. Clean voice + very soft room tone. NO outdoor wind, NO traffic, NO street noise, NO music, NO echo. If reference video was filmed outside, ignore that ambience.
 Color grade: Slightly desaturated, warm, matte/flat like an iPhone without filters. Low sharpening. NOT vivid or cinematic.
 Aspect ratio: 9:16 vertical.
 
@@ -1054,6 +1071,7 @@ When unsure, choose the simpler interaction — Seedance handles "hand holds obj
 Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.
 Lighting: Soft directional window light, warm and diffused. Creates a subtle soft shadow — NOT harsh or stark. Like overcast daylight through sheer curtains. NOT ring light, NOT studio strobe.
 Background: Lived-in home — kitchen counter, bathroom shelf, living room couch. Slightly cluttered. NOT a studio backdrop.
+Audio environment: INDOOR ONLY — quiet residential interior. Clean voice + very soft room tone. NO outdoor wind, NO traffic, NO street noise, NO music, NO echo. If reference video was filmed outside, ignore that ambience.
 Color grade: Slightly desaturated, warm, matte/flat like an iPhone without filters. Low sharpening. NOT vivid or cinematic.
 Aspect ratio: 9:16 vertical.
 
