@@ -129,7 +129,7 @@ function formatProductInfo(productInfo) {
   return lines.join('\n')
 }
 
-export async function analyzeAndGeneratePrompt({
+export async function analyzeAndGeneratePrompt_OLD_SINGLE_CALL({
   videoFilePath,        // 参考视频本地路径（与 videoUrl 二选一）
   videoUrl,             // 参考视频远程直链，如 snaptik 无水印链接（与 videoFilePath 二选一）
   imageFiles,           // multer file objects [{ path, originalname }]（与 productImageUrls 二选一）
@@ -608,6 +608,589 @@ Return ONLY this valid JSON, no markdown fences, no explanation:
   if (tmpVideoPath) {
     unlink(tmpVideoPath).catch(() => {})
   }
+
+  return result
+}
+
+// =====================================================================
+// 新版：拆分为两次 Gemini 调用
+//   Pass 1 — 分析（视频 + 全部图）：transcript / video_analysis / 选图 /
+//             产品视觉特征 / 关键片段 / compressed_script
+//   Pass 2 — 撰写（仅选中的图，不带视频）：seedance_prompt
+// 优点：每次任务专注，质量↑；Pass 2 payload 小、速度快；总时间 ↓
+// =====================================================================
+
+// 把视频准备成 inline part（如果是 URL 先下载到本地临时文件）
+async function prepareVideoPart(videoUrl, videoFilePath) {
+  let tmpVideoPath = null
+  if (videoUrl) {
+    console.log(`  [Gemini] 下载视频...`)
+    tmpVideoPath = path.join(os.tmpdir(), `${uuidv4()}.mp4`)
+    const dlRes = await axios.get(videoUrl, {
+      responseType: 'arraybuffer',
+      timeout: 120000,
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+    })
+    await writeFile(tmpVideoPath, dlRes.data)
+    console.log(`  [Gemini] 下载完成 ${(dlRes.data.byteLength / 1024 / 1024).toFixed(1)} MB`)
+  }
+  const finalVideoPath = tmpVideoPath || videoFilePath
+  const videoBuffer = await readFileAsync(finalVideoPath)
+  const videoMime = finalVideoPath.endsWith('.mov') ? 'video/quicktime' : 'video/mp4'
+  console.log(`  [Gemini] 视频 inline base64 (${(videoBuffer.length / 1024 / 1024).toFixed(1)} MB)`)
+  const videoPart = {
+    inlineData: { mimeType: videoMime, data: videoBuffer.toString('base64') },
+  }
+  return { videoPart, tmpVideoPath }
+}
+
+// 把所有产品图准备成 inline parts，同时返回 imageOrigins 用于后续映射
+// 远程图的 inline buffer 一并返回，给 Pass 2 复用，避免重新下载
+async function prepareImageParts({ imageFiles, productImageUrls, imageUrls }) {
+  const localImages = imageFiles || []
+  const remoteImages = productImageUrls || []
+  const totalImages = localImages.length + remoteImages.length
+  const imageOrigins = []
+  // 保存每张图对应的 inline part（按 1-based index）→ Pass 2 直接复用
+  const inlinePartByIndex = {}
+
+  const labelParts = [] // [{ idx, labelText, inlinePart }]
+
+  for (let i = 0; i < localImages.length; i++) {
+    const idx = i + 1
+    const labelText = `[Image ${idx}: uploaded "${localImages[i].originalname}"]`
+    const inlinePart = await imageToInlinePart(localImages[i].path, localImages[i].originalname)
+    labelParts.push({ idx, labelText, inlinePart })
+    inlinePartByIndex[idx] = inlinePart
+    imageOrigins.push({
+      source: 'local',
+      uploadedUrl: imageUrls?.find(u => u.index === i)?.url || null,
+    })
+  }
+
+  if (remoteImages.length > 0) {
+    console.log(`  [Gemini] 下载 ${remoteImages.length} 张远程产品图...`)
+    const { default: sharp } = await import('sharp')
+    for (let i = 0; i < remoteImages.length; i++) {
+      const idx = localImages.length + i + 1
+      try {
+        const imgRes = await axios.get(remoteImages[i], {
+          responseType: 'arraybuffer',
+          timeout: 30000,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        })
+        let buf = await sharp(Buffer.from(imgRes.data))
+          .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 80 })
+          .toBuffer()
+        if (buf.length > GEMINI_IMAGE_MAX_BYTES) {
+          buf = await sharp(buf).jpeg({ quality: 60 }).toBuffer()
+        }
+        const inlinePart = {
+          inlineData: { mimeType: 'image/jpeg', data: buf.toString('base64') },
+        }
+        labelParts.push({
+          idx,
+          labelText: `[Image ${idx}: from product listing]`,
+          inlinePart,
+        })
+        inlinePartByIndex[idx] = inlinePart
+        imageOrigins.push({ source: 'remote', sourceUrl: remoteImages[i] })
+      } catch (e) {
+        console.warn(`  [Gemini] 图片 ${idx} 下载失败: ${e.message}`)
+        imageOrigins.push({ source: 'remote', sourceUrl: remoteImages[i], failed: true })
+      }
+    }
+  }
+
+  return { labelParts, imageOrigins, totalImages, inlinePartByIndex }
+}
+
+// ==== Pass 1: 分析 ====
+async function geminiPass1Analyze({
+  videoPart,
+  labelParts,
+  totalImages,
+  productInfoText,
+  scriptModeInstruction,
+  isSameProduct,
+  targetDuration,
+}) {
+  const parts = []
+  parts.push({
+    text: `You are an expert AI video production analyst for e-commerce UGC videos.
+
+This is PASS 1 of 2 — your job is ANALYSIS ONLY. A second pass will write the actual video generation prompt later, using your structured output. Focus all your attention on accurate observation, not creative writing.
+
+First, here is the REFERENCE VIDEO to analyze:`,
+  })
+  parts.push(videoPart)
+  parts.push({ text: `\nNext, here are ${totalImages} PRODUCT IMAGES to choose from (numbered 1..${totalImages}):` })
+  for (const { labelText, inlinePart } of labelParts) {
+    parts.push({ text: labelText })
+    parts.push(inlinePart)
+  }
+
+  parts.push({
+    text: `
+
+Target video duration: ${targetDuration} seconds
+${productInfoText ? `\n=== PRODUCT LISTING INFO (from TikTok Shop — treat as ground truth for product facts) ===\n${productInfoText}\n===` : ''}
+${scriptModeInstruction}
+
+=== YOUR ANALYSIS TASKS ===
+
+TASK 1 - Transcribe and analyze the reference video:
+
+Step 1a — Full word-for-word transcript:
+Listen carefully and transcribe EVERY spoken word in the video into English, verbatim. Include filler words ("um", "like", "honestly"), pauses marked with "...", and natural interjections.
+${isSameProduct
+  ? 'This transcript will be compressed into the final script in Pass 2 — preserve it accurately.'
+  : 'This transcript is a STYLE REFERENCE ONLY — extract speaking patterns, not content.'}
+
+Step 1b — Video analysis (used by Pass 2 to write the prompt):
+- product_category: generic product type (e.g. apparel, skincare, kitchenware)
+- product_description: what the product is, key features, colors/materials
+- presenter_description: age range, body type, hair, skin tone, clothing, energy level (THIS WILL BE USED ONLY AS A STYLE REFERENCE — Pass 2 will generate a DIFFERENT person, not copy this one)
+- filming_style: handheld/static/shaky, shot distance, lighting, background
+- speaking_style: pace, tone, emotional register, use of gestures
+- shot_sequence: full sequence of shots with EXACT timestamps and what was said at each moment
+- key_selling_points: specific product benefits mentioned (use EXACT words from the transcript)
+- ugc_style_notes: authenticity cues, casual delivery, relatable moments
+- mood: overall energy and feel
+
+TASK 2 - Select the best 5-9 product images.
+Prioritize: hero/overview shot, key feature close-ups, texture/material details, functional details, on-body fit shots if available.
+Return their indices (1-based). Pass 2 will only see these selected images, so PICK CAREFULLY — anything not selected won't influence the final prompt.
+
+TASK 2b - Describe the product's KEY VISUAL FEATURES (CRITICAL — generated video must match these exactly):
+Look at the product images carefully. Describe ONLY what you actually see — no assumptions.
+Required fields (use null if not visible):
+- silhouette: overall shape (e.g. "deep V plunge with center gore well below cleavage line", "high-neck halter", "sports bra band")
+- structure: underwire / wireless, padded / unlined, molded cup / soft cup
+- construction: lace panels / smooth seamless / bonded edges / visible seams / mesh inserts
+- edge_finish: How are the cup and band edges finished? Choose the MOST accurate:
+  • "laser-cut flat edges — zero visible stitching, no folded trim, edges lie completely flat against skin"
+  • "narrow bonded edge — thin heat-bonded tape, minimal visible stitching, nearly flush with skin"
+  • "fabric-covered underwire channel — slim channel, mostly hidden, low profile"
+  • "visible sewn trim / picot edge — decorative stitched border visible on cup or band"
+  • "thick bound edge — clearly raised folded fabric trim with visible topstitching"
+  Be precise: this field directly controls whether visible stitching, trim, or thick edges appear in the generated video.
+- underwire_profile: How prominent is the underwire channel? Choose:
+  • "invisible underwire — channel completely hidden within seamless fabric, no visible ridge"
+  • "low-profile channel — subtle gentle ridge, blends into fabric"
+  • "standard channel — moderately visible raised channel"
+  • "prominent channel — clearly raised thick seam"
+- fabric_drape: How does the fabric behave against the body?
+  • "second-skin drape — fabric conforms instantly to body contours, no stiff edges, no gaps"
+  • "semi-structured — mostly conforming but cup maintains some shape away from skin"
+  • "structured / stiff — cup holds shape independent of body, visible gap at edges"
+- straps: width, adjustability, color, racerback / standard / convertible
+- closure: hook-and-eye rows count / front-clasp / pullover
+- fabric_visual: how the fabric looks on screen (e.g. "matte microfiber, slight sheen", "stretch lace with floral pattern", "ribbed athletic mesh")
+- color: exact color name as shown
+- distinguishing_details: anything that makes this product unique (bow, contrast trim, decorative panels, etc.)
+
+TASK 2c - Identify the BEST 15-second segment of the reference video.
+Pick the segment with the highest information density: presenter on camera + product visible + key actions.
+Skip intros/outros that are just talking heads or static shots.
+Output start/end seconds (integers). end - start MUST be ≤ 15.
+
+TASK 3 - Compress the script.
+Produce a ${targetDuration}-second compressed_script (≤ ${Math.round(targetDuration * 2.8)} words at ~2.8 words/sec).
+
+CONTENT POLICY (apply to compressed_script):
+- "saggy", "saggy boobs", "saggy titty", "saggy tits" → "lift and shape", "volume loss", "chest support"
+- "titty", "titties", "tits", "boobs", "boobies" → "chest", "bust"
+- "ass", "booty" → "shape", "silhouette"
+- profanity (fuck, shit, damn) → remove or replace with "literally", "honestly", "seriously"
+- explicit sexual descriptors → neutral fit/shape language
+
+Return ONLY this valid JSON, no markdown fences, no explanation:
+{
+  "video_analysis": {
+    "product_category": "",
+    "product_description": "",
+    "presenter_description": "",
+    "filming_style": "",
+    "speaking_style": "",
+    "shot_sequence": "",
+    "key_selling_points": [],
+    "ugc_style_notes": "",
+    "mood": ""
+  },
+  "product_visual_features": {
+    "silhouette": "",
+    "structure": "",
+    "construction": "",
+    "edge_finish": "",
+    "underwire_profile": "",
+    "fabric_drape": "",
+    "straps": "",
+    "closure": "",
+    "fabric_visual": "",
+    "color": "",
+    "distinguishing_details": ""
+  },
+  "key_segment_start_seconds": 0,
+  "key_segment_end_seconds": 15,
+  "selected_image_indices": [1, 3, 5, 7, 9],
+  "compressed_script": "the ${targetDuration}s script (≤${Math.round(targetDuration * 2.8)} words, all flagged words replaced)",
+  "image_selection_reasoning": "1-2 sentences explaining why these images were chosen"
+}`,
+  })
+
+  const t0 = Date.now()
+  const response = await genai.models.generateContent({
+    model: 'gemini-3.1-pro-preview',
+    contents: [{ role: 'user', parts }],
+  })
+  console.log(`  [Gemini Pass 1] 完成（${((Date.now() - t0) / 1000).toFixed(1)}s）`)
+
+  if (!response.candidates || response.candidates.length === 0) {
+    throw new Error(`Gemini Pass 1 无返回内容。promptFeedback: ${JSON.stringify(response.promptFeedback)}`)
+  }
+  const text = response.candidates[0].content.parts[0].text
+  const cleaned = text.replace(/```json|```/g, '').trim()
+  try {
+    return JSON.parse(cleaned)
+  } catch (e) {
+    console.error('Pass 1 JSON parse error:', e)
+    console.error('Raw:', text.slice(0, 800))
+    throw new Error('Pass 1: failed to parse Gemini response')
+  }
+}
+
+// ==== Pass 2: 撰写 Seedance prompt ====
+// 只传选中的产品图（不带视频），payload 小、速度快、Gemini 专注于撰写
+async function geminiPass2WritePrompt({
+  pass1Result,
+  selectedImageParts, // [{ idx, labelText, inlinePart }]
+  productInfoText,
+  scriptModeInstruction,
+  isSameProduct,
+  targetDuration,
+  category,
+  userDescription,
+}) {
+  const dialogueRule = isSameProduct
+    ? `1. SPOKEN DIALOGUE: Use the compressed_script verbatim from PASS 1 ANALYSIS. Distribute it across the SHOT SEQUENCE shots, preserving the exact wording.`
+    : `1. SPOKEN DIALOGUE: Use the compressed_script verbatim from PASS 1 ANALYSIS as the dialogue. It was already written fresh based on this product.`
+
+  const task3Lingerie = `
+TASK 3 - Generate a Seedance2 prompt. [CATEGORY: LINGERIE / SHAPEWEAR]
+
+CRITICAL RULES:
+${dialogueRule}
+2. DO NOT reference @ImageN or insert static images in the shot sequence. Product images are for your reference only — use them to write accurate ACTION descriptions. The video must show a REAL PERSON PERFORMING ACTIONS.
+3. The presenter wears the product throughout. Use TWO distinct looks cut between via edits (NOT in-frame undressing).
+4. Speaking pace: FAST and energetic. Pack lines tightly — minimal pauses between sentences.
+
+Use this FIXED STRUCTURE:
+
+---
+[PRODUCT VISUAL ANCHOR — READ THIS FIRST. Every frame of the video must be consistent with these specs. This is the highest-priority constraint.]
+Silhouette: <copy verbatim from product_visual_features.silhouette>
+Structure: <copy verbatim from product_visual_features.structure>
+Construction: <copy verbatim from product_visual_features.construction>
+Edge finish: <copy verbatim from product_visual_features.edge_finish>
+Underwire profile: <copy verbatim from product_visual_features.underwire_profile>
+Fabric drape: <copy verbatim from product_visual_features.fabric_drape>
+Straps: <copy verbatim from product_visual_features.straps>
+Closure: <copy verbatim from product_visual_features.closure>
+Fabric look: <copy verbatim from product_visual_features.fabric_visual>
+Color: <copy verbatim from product_visual_features.color>
+Distinguishing details: <copy verbatim from product_visual_features.distinguishing_details>
+Required visual outcome: <write 1-3 plain declarative sentences describing — based on the actual edge_finish/underwire_profile/fabric_drape values for THIS product — what the cups, band edges, and underwire should literally look like in the video. Examples: "Cups have flat laser-cut edges with no visible stitching or folded trim." / "Underwire sits inside an invisible channel with no raised ridge." / "Fabric drapes as a second skin, cup edges flush against the body." DO NOT write conditional logic. Resolve the conditions yourself based on this product's anchor values and write the final outcome as plain statements. Video models ignore if/then logic and will blend all keywords from both branches, causing hallucinations.>
+
+[PRODUCT NOTES - internal only, do NOT speak or display these words in video]
+Based on product images: <note key visible details — fabric color, texture, strap style, clasp type, construction>. Use to write accurate action descriptions only.
+
+[OPENING LINE]
+"Generate a ${targetDuration}-second authentic UGC-style promotional video for <one precise sentence describing the product using PRODUCT VISUAL ANCHOR fields — e.g. 'a deep-V plunge underwire bra with laser-cut flat edges, unlined smooth microfiber cups in warm beige'>."
+
+[PRESENTER]
+Real everyday person, NOT a model or influencer.
+<Fill in: age range, body type, hair color/length casually styled, skin tone with natural features — visible pores, possible freckles, natural texture. NOT "flawless".>
+Warm, relaxed energy. Talks fast like she's sharing a secret with a friend.
+
+OUTFIT — two looks, alternating via clean cuts:
+- LOOK A (talking shots): wears an open casual cardigan over the product. Relaxed at-home feel.
+- LOOK B (product demo shots): wears only the product — no outer layer. Shows fit, silhouette, strap placement, fabric on skin.
+Cuts between Look A ↔ Look B are intentional. Do NOT attempt in-frame undressing.
+
+[SHOT SEQUENCE]
+Every shot = a real person doing something. No static images. No product-on-white-background shots.
+
+WORD BUDGET: total dialogue ≤ ${Math.round(targetDuration * 2.8)} words. Distribute the compressed_script across these shots, never exceeding the per-shot time × 2.8 words limit. Leave the last 1-2 seconds SILENT or with a gesture/smile.
+
+[0–Xs] LOOK A. Medium close-up — she faces camera, talks fast. Says: "<part 1 of compressed_script>"
+[Xs–Ys] LOOK B. She adjusts/demonstrates the product directly on her body — <specific action from product images: e.g. "she slides a finger under the underwire showing it sits completely flat", "she turns sideways showing the silhouette", "she pulls the band away from her torso then releases it snapping back">. Fast voiceover: "<part 2 of compressed_script>"
+[Ys–Zs] LOOK B close-up. Hands demonstrate a specific product component — <e.g. "she pinches and stretches the bra strap showing elasticity and snap-back", "she traces the seamless edge along her ribcage">. Action is on the actual product, NOT on outer clothing. Voiceover: "<part 3 of compressed_script>"
+[Zs–${targetDuration}s] LOOK A. She smiles at camera. Says quickly: "<SHORT closing — max 6 words. Must finish with 1s to spare.>"
+
+[STYLE]
+Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.
+Lighting: Soft directional window light, warm and diffused, from a nearby window at a gentle angle. Creates a SOFT natural shadow — subtle and gradual, NOT a harsh stark black shadow. Like overcast daylight through sheer curtains. Skin looks warm and dimensional. NOT ring light, NOT studio strobe, NOT sharp spotlight.
+Background: Lived-in home — bedroom, living room, or bathroom. Slightly cluttered. NOT a studio backdrop.
+Color grade: Slightly desaturated, warm, matte/flat like an iPhone without filters. Low sharpening. NOT vivid or cinematic.
+Aspect ratio: 9:16 vertical.
+
+[AUTHENTICITY]
+Minimal/no makeup. Natural skin — visible pores, slight texture, possible blemishes. NOT airbrushed.
+Hair casually styled, slightly imperfect — a strand out of place is good.
+Expression: warm, fast-talking, spontaneous. Like sharing a secret. NOT posed or rehearsed.
+Body language: loose, continuous, slightly imprecise movements. No theatrical pauses.
+
+[SPEAKING STYLE]
+FAST pace throughout — excited, can't wait to tell you. Barely pauses between sentences.
+Natural speech: brief "um" or "like" from transcript where they appeared.
+One or two interjections: "Honestly", "Oh my god", "Seriously" — only where natural.
+NOT a broadcaster voice.
+
+[AVOID]
+No static images in video. No shots without a person. No gimbal. No harsh one-sided lighting. No airbrushed skin. No model poses. No slow delivery. No invented lines. No @Image references in video content.
+PRODUCT ACCURACY — <write 1-2 plain declarative sentences describing exactly what visual features must NOT appear, based on this product's actual anchor values. Examples: "Do not show visible stitched trim, folded hems, or thick bound edges on the cups." (when this product has laser-cut edges) / "Do not show a prominent underwire ridge or thick channel seam." (when this product has invisible underwire). DO NOT write "if anchor says X then..." — resolve it based on this product and state the bans as plain facts.>
+PRODUCT INTEGRITY — when the product is shown held in hand or off-body, it must still match the PRODUCT VISUAL ANCHOR exactly: straps in correct positions, closure on the BACK only (never on the front of a back-closure bra), cup count and shape matching the anchor. Do NOT generate distorted, mirror-flipped, or structurally incorrect versions of the product.
+---`
+
+  const task3General = `
+TASK 3 - Generate a Seedance2 prompt. [CATEGORY: GENERAL]
+
+CRITICAL RULES:
+${dialogueRule}
+2. DO NOT reference @ImageN or insert static images in the shot sequence. Product images are reference only — use them to write accurate ACTION descriptions. Video must show a REAL PERSON PERFORMING ACTIONS.
+3. The presenter actively uses/demonstrates the product throughout. Describe specific physical interactions with the product.
+4. Speaking pace: FAST and energetic. Pack lines tightly — minimal pauses.
+
+Use this FIXED STRUCTURE:
+
+---
+[PRODUCT VISUAL ANCHOR — READ THIS FIRST. Every frame of the video must be consistent with these specs. This is the highest-priority constraint.]
+Silhouette/Shape: <copy from product_visual_features.silhouette — be specific, not generic>
+Structure: <copy from product_visual_features.structure>
+Construction: <copy from product_visual_features.construction>
+Color: <copy from product_visual_features.color>
+Distinguishing details: <copy from product_visual_features.distinguishing_details — specific elements that identify THIS product, not a generic version>
+ENFORCEMENT: The product appearing in every frame must match every field above exactly. Do NOT substitute a similar-looking generic product. When visual details conflict with a "default" version of this product type, always follow the anchor.
+
+[PRODUCT NOTES - internal only, do NOT speak or display these words in video]
+Based on product images: <note key visible details — shape, color, material, key features, how it's used>. Use to write accurate action descriptions only.
+
+[OPENING LINE]
+"Generate a ${targetDuration}-second authentic UGC-style promotional video for <one precise sentence describing the product using PRODUCT VISUAL ANCHOR fields>."
+
+[PRESENTER]
+Real everyday person, NOT a model or influencer.
+<Fill in: age range, body type, hair color/length casually styled, skin tone with natural features — visible pores, possible freckles. NOT "flawless".>
+Warm, relaxed energy. Talks fast like sharing a discovery with a friend.
+Clothing: casual everyday wear appropriate for demonstrating this type of product at home.
+
+[SHOT SEQUENCE]
+Every shot = a real person doing something. No static images. No product-on-white-background shots.
+
+WORD BUDGET: total dialogue ≤ ${Math.round(targetDuration * 2.8)} words. Distribute the compressed_script across these shots. Leave the last 1-2 seconds SILENT.
+
+[0–Xs] Medium close-up — faces camera, talks fast. Says: "<part 1 of compressed_script>"
+[Xs–Ys] Presenter actively uses/demonstrates the product — <specific action based on product type>. Fast voiceover: "<part 2 of compressed_script>"
+[Ys–Zs] Close-up on hands/product interaction showing a specific feature — <specific demo>. Voiceover: "<part 3 of compressed_script>"
+[Zs–${targetDuration}s] She looks at camera, smiles. Says quickly: "<SHORT closing — max 6 words.>"
+
+[STYLE]
+Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.
+Lighting: Soft directional window light, warm and diffused. Creates a subtle soft shadow — NOT harsh or stark. Like overcast daylight through sheer curtains. NOT ring light, NOT studio strobe.
+Background: Lived-in home — kitchen counter, bathroom shelf, living room couch. Slightly cluttered. NOT a studio backdrop.
+Color grade: Slightly desaturated, warm, matte/flat like an iPhone without filters. Low sharpening. NOT vivid or cinematic.
+Aspect ratio: 9:16 vertical.
+
+[AUTHENTICITY]
+Minimal/no makeup. Natural skin — visible pores, slight texture. NOT airbrushed.
+Hair casually styled, slightly imperfect.
+Expression: warm, fast-talking, spontaneous. NOT posed or rehearsed.
+Body language: loose, continuous movements. No theatrical pauses.
+
+[SPEAKING STYLE]
+FAST pace — excited, barely pauses between sentences.
+Natural speech patterns from transcript: brief "um" or "like" where they appeared.
+One or two interjections: "Honestly", "Oh my god", "Seriously" — only where natural.
+NOT a broadcaster voice.
+
+[AVOID]
+No static images in video. No shots without a person. No gimbal. No harsh lighting. No airbrushed skin. No model poses. No slow delivery. No invented lines. No @Image references in video content.
+PRODUCT ACCURACY — never substitute a generic version of this product type. The product shown must match the PRODUCT VISUAL ANCHOR in every frame.
+PRODUCT INTEGRITY — when the product is shown held in hand or off-body, it must still match the PRODUCT VISUAL ANCHOR exactly. Do NOT generate distorted or structurally incorrect versions of the product.
+---`
+
+  const task3 = category === 'lingerie' ? task3Lingerie : task3General
+
+  const parts = []
+  parts.push({
+    text: `You are an expert UGC video prompt writer.
+
+This is PASS 2 of 2. PASS 1 already analyzed the reference video and product images. Your job now is to WRITE the final Seedance2 prompt using PASS 1's structured output. You do NOT have access to the reference video — only to the product images PASS 1 selected as best.
+
+Below are the SELECTED product images (the same indices PASS 1 chose):`,
+  })
+  for (const { labelText, inlinePart } of selectedImageParts) {
+    parts.push({ text: labelText })
+    parts.push(inlinePart)
+  }
+
+  parts.push({
+    text: `
+
+User's additional ideas: ${userDescription || 'None provided'}
+Target duration: ${targetDuration} seconds
+${productInfoText ? `\n=== PRODUCT LISTING INFO (treat as ground truth) ===\n${productInfoText}\n===` : ''}
+${scriptModeInstruction}
+
+=== PASS 1 ANALYSIS RESULT (use as input) ===
+${JSON.stringify(pass1Result, null, 2)}
+=== END PASS 1 ===
+
+${task3}
+
+IMPORTANT RULES:
+- The seedance_prompt MUST follow the FIXED STRUCTURE above exactly. Replace every <...> placeholder with concrete content based on the PASS 1 analysis and the product images shown.
+- Copy product_visual_features values VERBATIM into the [PRODUCT VISUAL ANCHOR] block. Do not paraphrase.
+- Use the compressed_script from PASS 1 as the source of all spoken dialogue — distribute it across SHOT SEQUENCE lines, preserving exact wording.
+- Do NOT include [FACE & LIKENESS], [REFERENCE VIDEO USAGE], [ANATOMICAL ACCURACY], [NO ON-SCREEN TEXT], [NO IMPROVISED DIALOGUE], or [BODY ATTACHMENT BAN] blocks — these are appended automatically by the pipeline.
+- CRITICAL — NO CONDITIONAL LOGIC IN PROMPT: The seedance_prompt is consumed by a video model that does NOT understand "if/then" / "if X then Y" / "when anchor says X" / conditional clauses. It blends ALL keywords from BOTH branches of any conditional, causing severe hallucinations. RESOLVE every conditional based on PASS 1's actual product_visual_features values and write the FINAL OUTCOME as plain declarative sentences. Never leave words like "if", "when anchor says", "depending on" in the final prompt.
+
+Return ONLY this valid JSON, no markdown fences, no explanation:
+{
+  "seedance_prompt": "the full Seedance2 prompt with all placeholders resolved into concrete sentences"
+}`,
+  })
+
+  const t0 = Date.now()
+  const response = await genai.models.generateContent({
+    model: 'gemini-3.1-pro-preview',
+    contents: [{ role: 'user', parts }],
+  })
+  console.log(`  [Gemini Pass 2] 完成（${((Date.now() - t0) / 1000).toFixed(1)}s）`)
+
+  if (!response.candidates || response.candidates.length === 0) {
+    throw new Error(`Gemini Pass 2 无返回内容。promptFeedback: ${JSON.stringify(response.promptFeedback)}`)
+  }
+  const text = response.candidates[0].content.parts[0].text
+  const cleaned = text.replace(/```json|```/g, '').trim()
+  try {
+    return JSON.parse(cleaned)
+  } catch (e) {
+    console.error('Pass 2 JSON parse error:', e)
+    console.error('Raw:', text.slice(0, 800))
+    throw new Error('Pass 2: failed to parse Gemini response')
+  }
+}
+
+// 入口：兼容旧签名，内部串联 Pass 1 + Pass 2
+export async function analyzeAndGeneratePrompt({
+  videoFilePath,
+  videoUrl,
+  imageFiles,
+  productImageUrls,
+  imageUrls,
+  userDescription,
+  targetDuration,
+  category = 'general',
+  productInfo = null,
+  isSameProduct = true,
+}) {
+  // 1) 准备视频和图片 inline parts
+  const { videoPart, tmpVideoPath } = await prepareVideoPart(videoUrl, videoFilePath)
+  const { labelParts, imageOrigins, totalImages, inlinePartByIndex } =
+    await prepareImageParts({ imageFiles, productImageUrls, imageUrls })
+
+  // 2) 公用文本块
+  const productInfoText = formatProductInfo(productInfo)
+  const scriptModeInstruction = isSameProduct ? `
+=== SCRIPT MODE: SAME PRODUCT ===
+The reference video IS for the same product being promoted. Therefore:
+- The transcript from PASS 1 is the PRIMARY source for spoken dialogue.
+- Compress the transcript directly into a ${targetDuration}-second script. Keep specific pain points, product details, and CTAs as close to the original wording as possible.
+- If PRODUCT LISTING INFO is provided below, use it to SUPPLEMENT the transcript — add material/fabric details or specs that weren't mentioned. Do NOT replace original lines.
+===` : `
+=== SCRIPT MODE: DIFFERENT PRODUCT ===
+The reference video is NOT for the same product — it is used as a STYLE REFERENCE ONLY. Therefore:
+- Extract speaking pace, tone, sentence rhythm, energy level, and UGC authenticity cues from the transcript.
+- Do NOT use the actual spoken content from the transcript as dialogue.
+- The compressed_script must be written FRESH based on the PRODUCT LISTING INFO and product images.
+- Mirror the style and structure of the reference transcript (opener type, pacing, CTA style) — but with content about the actual product.
+===`
+
+  let pass1Result, pass2Result
+  try {
+    // 3) Pass 1: 分析
+    console.log(`  [Gemini] === Pass 1: 分析视频 + 选图 + 提取特征 ===`)
+    pass1Result = await geminiPass1Analyze({
+      videoPart,
+      labelParts,
+      totalImages,
+      productInfoText,
+      scriptModeInstruction,
+      isSameProduct,
+      targetDuration,
+    })
+
+    // 4) 把 Pass 1 选中的图准备成 Pass 2 的输入（复用 inline part，不重新下载/压缩）
+    const selectedIndices = (pass1Result.selected_image_indices || []).filter(
+      idx => idx >= 1 && idx <= totalImages
+    )
+    if (selectedIndices.length === 0) {
+      throw new Error('Pass 1 没有选出任何图片')
+    }
+    const selectedImageParts = selectedIndices
+      .map(idx => ({
+        idx,
+        labelText: `[Image ${idx}]`,
+        inlinePart: inlinePartByIndex[idx],
+      }))
+      .filter(p => p.inlinePart) // 过滤下载失败的
+    console.log(`  [Gemini] Pass 1 选中 ${selectedImageParts.length} 张图，传给 Pass 2`)
+
+    // 5) Pass 2: 撰写 Seedance prompt（无视频，仅选中的图）
+    console.log(`  [Gemini] === Pass 2: 撰写 Seedance prompt（无视频，仅 ${selectedImageParts.length} 张选中图）===`)
+    pass2Result = await geminiPass2WritePrompt({
+      pass1Result,
+      selectedImageParts,
+      productInfoText,
+      scriptModeInstruction,
+      isSameProduct,
+      targetDuration,
+      category,
+      userDescription,
+    })
+  } finally {
+    // 清理临时视频文件
+    if (tmpVideoPath) unlink(tmpVideoPath).catch(() => {})
+  }
+
+  // 6) 合并 Pass 1 + Pass 2 结果，组装成与旧版兼容的返回结构
+  const result = {
+    video_analysis: pass1Result.video_analysis || {},
+    product_visual_features: pass1Result.product_visual_features || {},
+    key_segment_start_seconds: pass1Result.key_segment_start_seconds,
+    key_segment_end_seconds: pass1Result.key_segment_end_seconds,
+    selected_image_indices: pass1Result.selected_image_indices || [],
+    compressed_script: pass1Result.compressed_script || '',
+    seedance_prompt: pass2Result.seedance_prompt || '',
+    reasoning: pass1Result.image_selection_reasoning || '',
+  }
+
+  // 把选中图片编号映射到来源信息（与旧版一致）
+  const validSelectedIndices = (result.selected_image_indices || []).filter(
+    idx => idx >= 1 && idx <= imageOrigins.length
+  )
+  result.selected_images = validSelectedIndices.map(idx => {
+    const origin = imageOrigins[idx - 1]
+    if (!origin || origin.failed) return null
+    if (origin.source === 'local') {
+      return { source: 'local', publicUrl: origin.uploadedUrl }
+    }
+    return { source: 'remote', sourceUrl: origin.sourceUrl }
+  }).filter(Boolean)
+  result.selected_image_urls = result.selected_images.map(s => s.publicUrl).filter(Boolean)
 
   return result
 }
