@@ -478,12 +478,25 @@ Judge based on what you actually see — do NOT assume product category.
 TASK 2b - Describe the product's KEY VISUAL FEATURES (CRITICAL — generated video must match these exactly):
 Look at the product images carefully. Describe ONLY what you actually see — no assumptions.
 Required fields (use null if not visible):
-- silhouette: overall shape (e.g. "deep V plunge with center gore well below cleavage line", "high-neck halter", "sports bra band")
+- silhouette: overall shape — describe what the bra LOOKS LIKE in the images, NOT what the product NAME says.
+  CRITICAL: Product names often contain marketing/SEO terms like "Demi", "Balconette", "Plunge", "Halter", "Bralette", "Push-Up" all bundled together (e.g. "Inbarely Plus Plunge Bra - Sexy Demi Balconette" — this name combines THREE different silhouettes that are physically incompatible). DO NOT copy product name into this field. Pick the ONE silhouette type that matches what you actually see in the hero shot.
+  Pick from these mutually-exclusive silhouettes:
+  • "deep V plunge with center gore well below cleavage line" (V-shape neckline going low between breasts)
+  • "demi cup with horizontal neckline cutting across the upper bust" (straight horizontal cut, wide-set straps)
+  • "balconette with squared/rectangular neckline and wide-set straps" (similar to demi but more rectangular)
+  • "full coverage with rounded scoop neckline"
+  • "high-neck / halter neckline"
+  • "triangle bralette with V-shaped triangular cups and minimal coverage"
+  • "sports bra band / pullover style"
+  Output ONE phrase only. Never combine two from this list.
 - structure: underwire / wireless, padded / unlined, molded cup / soft cup
 - construction: lace panels / smooth seamless / bonded edges / visible seams / mesh inserts
-- edge_finish: How are the cup and band edges finished? Choose the MOST accurate:
-  • "laser-cut flat edges — zero visible stitching, no folded trim, edges lie completely flat against skin"
-  • "narrow bonded edge — thin heat-bonded tape, minimal visible stitching, nearly flush with skin"
+- edge_finish: How are the cup and band edges finished? Choose the MOST accurate.
+  CRITICAL ASSUMPTION RULE: When you cannot clearly tell from the images, DEFAULT to "narrow folded fabric hem with low-profile stitching". Reason: 90%+ of e-commerce bras have folded stitched hems; truly seamless laser-cut edges are RARE and only appear on premium technical fabrics. False-negative-stitching (claiming seamless when there's actually a hem) causes the AI to render a structurally wrong garment. False-positive-stitching (claiming hem when actually seamless) only adds a barely-visible thin line. Always err toward "stitched hem" if uncertain.
+  Choose ONE:
+  • "narrow folded fabric hem with low-profile stitching — clean fine stitched edge, minimal bulk" ← DEFAULT when uncertain
+  • "laser-cut flat edges — zero visible stitching, no folded trim, edges lie completely flat against skin" ← only if 100% confirmed by close-up
+  • "narrow bonded edge — thin heat-bonded tape, no thread visible" ← only if 100% confirmed by close-up
   • "fabric-covered underwire channel — slim channel, mostly hidden, low profile"
   • "visible sewn trim / picot edge — decorative stitched border visible on cup or band"
   • "thick bound edge — clearly raised folded fabric trim with visible topstitching"
@@ -788,12 +801,25 @@ Return indices (1-based) and the role array. Pass 2 will only see selected image
 TASK 2b - Describe the product's KEY VISUAL FEATURES (CRITICAL — generated video must match these exactly):
 Look at the product images carefully. Describe ONLY what you actually see — no assumptions.
 Required fields (use null if not visible):
-- silhouette: overall shape (e.g. "deep V plunge with center gore well below cleavage line", "high-neck halter", "sports bra band")
+- silhouette: overall shape — describe what the bra LOOKS LIKE in the images, NOT what the product NAME says.
+  CRITICAL: Product names often contain marketing/SEO terms like "Demi", "Balconette", "Plunge", "Halter", "Bralette", "Push-Up" all bundled together (e.g. "Inbarely Plus Plunge Bra - Sexy Demi Balconette" — this name combines THREE different silhouettes that are physically incompatible). DO NOT copy product name into this field. Pick the ONE silhouette type that matches what you actually see in the hero shot.
+  Pick from these mutually-exclusive silhouettes:
+  • "deep V plunge with center gore well below cleavage line" (V-shape neckline going low between breasts)
+  • "demi cup with horizontal neckline cutting across the upper bust" (straight horizontal cut, wide-set straps)
+  • "balconette with squared/rectangular neckline and wide-set straps" (similar to demi but more rectangular)
+  • "full coverage with rounded scoop neckline"
+  • "high-neck / halter neckline"
+  • "triangle bralette with V-shaped triangular cups and minimal coverage"
+  • "sports bra band / pullover style"
+  Output ONE phrase only. Never combine two from this list.
 - structure: underwire / wireless, padded / unlined, molded cup / soft cup
 - construction: lace panels / smooth seamless / bonded edges / visible seams / mesh inserts
-- edge_finish: How are the cup and band edges finished? Choose the MOST accurate:
-  • "laser-cut flat edges — zero visible stitching, no folded trim, edges lie completely flat against skin"
-  • "narrow bonded edge — thin heat-bonded tape, minimal visible stitching, nearly flush with skin"
+- edge_finish: How are the cup and band edges finished? Choose the MOST accurate.
+  CRITICAL ASSUMPTION RULE: When you cannot clearly tell from the images, DEFAULT to "narrow folded fabric hem with low-profile stitching". Reason: 90%+ of e-commerce bras have folded stitched hems; truly seamless laser-cut edges are RARE and only appear on premium technical fabrics. False-negative-stitching (claiming seamless when there's actually a hem) causes the AI to render a structurally wrong garment. False-positive-stitching (claiming hem when actually seamless) only adds a barely-visible thin line. Always err toward "stitched hem" if uncertain.
+  Choose ONE:
+  • "narrow folded fabric hem with low-profile stitching — clean fine stitched edge, minimal bulk" ← DEFAULT when uncertain
+  • "laser-cut flat edges — zero visible stitching, no folded trim, edges lie completely flat against skin" ← only if 100% confirmed by close-up
+  • "narrow bonded edge — thin heat-bonded tape, no thread visible" ← only if 100% confirmed by close-up
   • "fabric-covered underwire channel — slim channel, mostly hidden, low profile"
   • "visible sewn trim / picot edge — decorative stitched border visible on cup or band"
   • "thick bound edge — clearly raised folded fabric trim with visible topstitching"
