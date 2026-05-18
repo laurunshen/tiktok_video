@@ -9,7 +9,7 @@ import axios from 'axios'
 import { analyzeAndGeneratePrompt, SEEDANCE_MANDATORY_BLOCKS, VARIANT_RECIPES } from '../services/gemini.js'
 import { validateGeminiOutput, formatValidationReport } from '../services/prompt-validator.js'
 import { reviewPrompt, reviseGeminiOutput, formatReviewReport, clearImageCache } from '../services/gemini-review.js'
-import { saveJob, getJob, listJobs, countJobs, saveVideo, updateVideoJudge, updateVideoDiffJudge, updateVideoUrl, getVideosByJob, markVideoPublished } from '../services/db.js'
+import { saveJob, getJob, listJobs, countJobs, countJobsByProduct, saveVideo, updateVideoJudge, updateVideoDiffJudge, updateVideoUrl, getVideosByJob, markVideoPublished } from '../services/db.js'
 import { S3_ENABLED, uploadUrlToS3, uploadVideoAndPosterFromUrl } from '../services/s3-upload.js'
 import { judgeGeneratedVideo, judgeNarrativeDifferentiation } from '../services/gemini-video-judge.js'
 import { uploadMediaFiles, uploadMediaFile } from '../services/media-upload.js'
@@ -678,7 +678,7 @@ router.get('/variants', (req, res) => {
   res.json({ count: variants.length, variants })
 })
 
-// GET /api/generate/jobs?limit=50&offset=0&status=completed - 历史任务列表
+// GET /api/generate/jobs?limit=50&offset=0&status=completed&productId=xxx - 历史任务列表
 // 每条 job 附带：videos 简要（taskId / video_url / 评分）便于历史页直接展示
 router.get('/jobs', (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 50, 200)
@@ -689,9 +689,10 @@ router.get('/jobs', (req, res) => {
   const unpublished = rawStatus === 'unpublished'
   const status = (published || unpublished) ? (unpublished ? 'completed' : null) : rawStatus
   const sortBy = req.query.sortBy === 'quality' ? 'quality' : 'time'
+  const productId = req.query.productId || null
   try {
-    const jobs = listJobs({ limit, offset, status, sortBy, published, unpublished })
-    const total = countJobs(status, published, unpublished)
+    const jobs = listJobs({ limit, offset, status, sortBy, published, unpublished, productId })
+    const total = countJobs(status, published, unpublished, productId)
     // 补 videos 摘要
     const enriched = jobs.map(j => {
       const vids = getVideosByJob(j.job_id) || []
@@ -710,6 +711,19 @@ router.get('/jobs', (req, res) => {
       }
     })
     res.json({ total, limit, offset, jobs: enriched })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// GET /api/generate/job-product-counts — 按 product_id 聚合 job 数（历史页下拉显示用）
+// 返回 { counts: { <product_id>: <count> } }；未关联产品的 job 不计入
+router.get('/job-product-counts', (req, res) => {
+  try {
+    const rows = countJobsByProduct()
+    const counts = {}
+    for (const r of rows) counts[r.product_id] = r.c
+    res.json({ counts })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

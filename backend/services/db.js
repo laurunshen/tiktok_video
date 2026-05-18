@@ -247,7 +247,7 @@ export function getJob(jobId) {
   return row ? JSON.parse(row.full_data) : null
 }
 
-export function listJobs({ limit = 50, offset = 0, status = null, sortBy = 'time', published = false, unpublished = false } = {}) {
+export function listJobs({ limit = 50, offset = 0, status = null, sortBy = 'time', published = false, unpublished = false, productId = null } = {}) {
   const baseCols = 'j.job_id, j.status, j.step_label, j.product_id, j.category, j.created_at, j.completed_at, j.total_ms, j.error_message'
   const params = []
   const needJoin = sortBy === 'quality'
@@ -255,6 +255,7 @@ export function listJobs({ limit = 50, offset = 0, status = null, sortBy = 'time
   if (needJoin) query += ' LEFT JOIN videos v ON v.job_id = j.job_id'
   const wheres = []
   if (status) { wheres.push('j.status = ?'); params.push(status) }
+  if (productId) { wheres.push('j.product_id = ?'); params.push(productId) }
   if (published) wheres.push('EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = j.job_id AND vp.is_published = 1)')
   // unpublished = 至少有一个视频 + 没有任何已发布的视频（"完成了但没发"的语义）
   if (unpublished) {
@@ -273,10 +274,11 @@ export function listJobs({ limit = 50, offset = 0, status = null, sortBy = 'time
   return db.prepare(query).all(...params)
 }
 
-export function countJobs(status = null, published = false, unpublished = false) {
+export function countJobs(status = null, published = false, unpublished = false, productId = null) {
   const params = []
   const wheres = []
   if (status) { wheres.push('status = ?'); params.push(status) }
+  if (productId) { wheres.push('product_id = ?'); params.push(productId) }
   if (published) wheres.push('EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = jobs.job_id AND vp.is_published = 1)')
   if (unpublished) {
     wheres.push('EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = jobs.job_id)')
@@ -285,6 +287,13 @@ export function countJobs(status = null, published = false, unpublished = false)
   let q = 'SELECT COUNT(*) AS c FROM jobs'
   if (wheres.length) q += ' WHERE ' + wheres.join(' AND ')
   return db.prepare(q).get(...params).c
+}
+
+// 按 product_id 聚合 job 数，供历史页下拉显示"每产品 N 条"
+export function countJobsByProduct() {
+  return db.prepare(
+    'SELECT product_id, COUNT(*) AS c FROM jobs WHERE product_id IS NOT NULL GROUP BY product_id'
+  ).all()
 }
 
 // ===== Video 操作 =====

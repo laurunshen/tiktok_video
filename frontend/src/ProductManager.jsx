@@ -225,7 +225,7 @@ function BulkTagBar({ onBulk, knownColors, sectionLabel }) {
 
 function CreateProductCard({ onCreated, showToast }) {
   const [url, setUrl] = useState('')
-  const [region, setRegion] = useState('SG')
+  const [region, setRegion] = useState('US')
   const [busy, setBusy] = useState(false)
   const submit = async () => {
     if (!url.trim()) return

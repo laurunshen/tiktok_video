@@ -113,7 +113,7 @@ export default function App() {
   const [description, setDescription] = useState('')
   const [category, setCategory] = useState('lingerie')
   const [productUrl, setProductUrl] = useState('')
-  const [productRegion, setProductRegion] = useState('SG')
+  const [productRegion, setProductRegion] = useState('US')
   const [productInfo, setProductInfo] = useState(null)
   const [productId, setProductId] = useState(null)
   const [fetchingProduct, setFetchingProduct] = useState(false)
@@ -227,7 +227,7 @@ export default function App() {
       setProductInfo(productInfo)
       setProductId(p.productId)
       setProductUrl(p.productId)
-      setProductRegion(p.region || 'SG')
+      setProductRegion(p.region || 'US')
       // 预取标杆视频
       setBenchmarkVideos([])
       setShowBenchmarks(false)

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 
 const API = '/api'
 
@@ -50,6 +50,30 @@ const s = {
   publishBoxPublished: { marginTop: 10, padding: '10px 12px', background: '#f0fdf4', borderRadius: 6, border: '1px solid #bbf7d0' },
   publishLabel: { fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'space-between' },
   publishBadge: { display: 'inline-block', padding: '2px 7px', borderRadius: 3, background: '#16a34a', color: '#fff', fontSize: 10, fontWeight: 700 },
+  // 产品筛选下拉
+  pdWrap: { position: 'relative', display: 'inline-block' },
+  pdTrigger: (active) => ({
+    display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px 4px 5px', borderRadius: 16,
+    border: `1px solid ${active ? '#6366f1' : '#e5e7eb'}`, background: active ? '#eef2ff' : '#fff',
+    color: active ? '#4338ca' : '#555', fontSize: 12, fontWeight: 500, cursor: 'pointer', maxWidth: 220,
+  }),
+  pdTriggerThumb: { width: 22, height: 22, borderRadius: 4, objectFit: 'cover', background: '#f3f4f6', flexShrink: 0 },
+  pdTriggerText: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 },
+  pdTriggerArrow: { fontSize: 9, color: '#9ca3af', flexShrink: 0 },
+  pdPanel: {
+    position: 'absolute', top: 'calc(100% + 6px)', left: 0, zIndex: 20,
+    background: '#fff', borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+    border: '1px solid #e5e7eb', minWidth: 260, maxHeight: 360, overflowY: 'auto', padding: 4,
+  },
+  pdItem: (active) => ({
+    display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6,
+    cursor: 'pointer', background: active ? '#eef2ff' : 'transparent',
+    color: active ? '#4338ca' : '#333', fontSize: 13,
+  }),
+  pdItemThumb: { width: 32, height: 32, borderRadius: 5, objectFit: 'cover', background: '#f3f4f6', flexShrink: 0 },
+  pdItemThumbPh: { width: 32, height: 32, borderRadius: 5, background: '#f3f4f6', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, color: '#bbb', flexShrink: 0 },
+  pdItemName: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  pdItemCount: { fontSize: 11, color: '#888', fontVariantNumeric: 'tabular-nums', flexShrink: 0 },
   publishRow: { display: 'flex', gap: 6, alignItems: 'center' },
   pubInput: { flex: 1, padding: '6px 9px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, outline: 'none' },
   pubBtn: (busy) => ({ padding: '6px 12px', borderRadius: 6, border: 'none', cursor: busy ? 'wait' : 'pointer', fontSize: 12, fontWeight: 600, background: busy ? '#a3a3a3' : '#6366f1', color: '#fff' }),
@@ -173,6 +197,62 @@ const SCORE_LABELS = {
   share_worthiness:       { label: '分享意愿',   tip: 'TikTok 用户愿不愿意转发/收藏' },
 }
 
+function ProductFilter({ products, productCounts, value, onChange, totalCount }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  const selected = value ? products.find(p => p.productId === value) : null
+  // 排序：先按 job 数降序，没记录的产品放最后；同数按 last_used_at（list 自带）
+  const sorted = [...products].sort((a, b) => (productCounts[b.productId] || 0) - (productCounts[a.productId] || 0))
+
+  return (
+    <div style={s.pdWrap} ref={ref}>
+      <div style={s.pdTrigger(!!value)} onClick={() => setOpen(o => !o)}>
+        {selected?.coverImageUrl
+          ? <img src={selected.coverImageUrl} alt="" style={s.pdTriggerThumb} />
+          : <span style={{ ...s.pdTriggerThumb, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12 }}>📦</span>}
+        <span style={s.pdTriggerText}>
+          {selected ? (selected.name || '(未命名)') : '全部产品'}
+        </span>
+        <span style={s.pdTriggerArrow}>▼</span>
+      </div>
+      {open && (
+        <div style={s.pdPanel}>
+          <div style={s.pdItem(!value)} onClick={() => { onChange(''); setOpen(false) }}>
+            <div style={{ ...s.pdItemThumbPh, fontSize: 16 }}>◯</div>
+            <span style={s.pdItemName}>全部产品</span>
+            <span style={s.pdItemCount}>{totalCount}</span>
+          </div>
+          {sorted.map(p => {
+            const cnt = productCounts[p.productId] || 0
+            return (
+              <div key={p.productId} style={s.pdItem(value === p.productId)}
+                onClick={() => { onChange(p.productId); setOpen(false) }}>
+                {p.coverImageUrl
+                  ? <img src={p.coverImageUrl} alt="" style={s.pdItemThumb} loading="lazy" />
+                  : <div style={s.pdItemThumbPh}>📦</div>}
+                <span style={s.pdItemName} title={p.name || p.productId}>{p.name || '(未命名)'}</span>
+                <span style={s.pdItemCount}>{cnt}</span>
+              </div>
+            )
+          })}
+          {sorted.length === 0 && (
+            <div style={{ padding: 12, fontSize: 12, color: '#888', textAlign: 'center' }}>
+              暂无缓存产品
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ScoreGrid({ scores }) {
   if (!scores) return null
   return (
@@ -207,6 +287,9 @@ export default function HistoryView() {
   const [jobs, setJobs] = useState([])
   const [total, setTotal] = useState(0)
   const [statusFilter, setStatusFilter] = useState('')  // 默认显示全部，运行中 job 自然出现在顶部
+  const [productFilter, setProductFilter] = useState('')  // '' = 全部产品；否则 productId
+  const [products, setProducts] = useState([])  // 用于下拉选择
+  const [productCounts, setProductCounts] = useState({})  // { productId: jobCount } — 显示每产品记录数
   const [sortBy, setSortBy] = useState('time')  // 'time' | 'quality'（按 video_judge_overall 降序，仅当前页内）
   const [page, setPage] = useState(1)  // 1-based
   const [loading, setLoading] = useState(true)
@@ -224,19 +307,28 @@ export default function HistoryView() {
     setLoading(true)
     try {
       const offset = (targetPage - 1) * PAGE_SIZE
-      const r = await fetch(`${API}/generate/jobs?limit=${PAGE_SIZE}&offset=${offset}${statusFilter ? `&status=${statusFilter}` : ''}&sortBy=${sortBy}`)
+      const qs = new URLSearchParams({ limit: PAGE_SIZE, offset, sortBy })
+      if (statusFilter) qs.set('status', statusFilter)
+      if (productFilter) qs.set('productId', productFilter)
+      const r = await fetch(`${API}/generate/jobs?${qs}`)
       const data = await r.json()
       setJobs(data.jobs || [])
       setTotal(data.total || 0)
     } finally {
       setLoading(false)
     }
-  }, [statusFilter, sortBy])
+  }, [statusFilter, sortBy, productFilter])
 
-  // 当 statusFilter / sortBy / page 变化时刷新
+  // 当 statusFilter / productFilter / sortBy / page 变化时刷新
   useEffect(() => { load(page) }, [load, page])
   // 切 filter / 排序 时回到第 1 页
-  useEffect(() => { setPage(1) /* load 会被 page->1 变化触发 */ }, [statusFilter, sortBy])
+  useEffect(() => { setPage(1) /* load 会被 page->1 变化触发 */ }, [statusFilter, sortBy, productFilter])
+
+  // 拉产品列表 + 每产品记录数（mount 一次）
+  useEffect(() => {
+    fetch(`${API}/product/list`).then(r => r.json()).then(d => setProducts(d.items || [])).catch(() => {})
+    fetch(`${API}/generate/job-product-counts`).then(r => r.json()).then(d => setProductCounts(d.counts || {})).catch(() => {})
+  }, [])
 
   const goToPage = (p) => {
     const clamped = Math.max(1, Math.min(totalPages, p))
@@ -313,8 +405,18 @@ export default function HistoryView() {
             {f.label}
           </div>
         ))}
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginLeft: 8, paddingLeft: 8, borderLeft: '1px solid #e5e7eb' }}>
+          <span style={{ fontSize: 11, color: '#888' }}>产品</span>
+          <ProductFilter
+            products={products}
+            productCounts={productCounts}
+            value={productFilter}
+            onChange={setProductFilter}
+            totalCount={Object.values(productCounts).reduce((a, b) => a + b, 0)}
+          />
+        </div>
         <button style={s.refreshBtn} onClick={() => load(page)}>🔄 刷新</button>
-        <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginLeft: 12, paddingLeft: 12, borderLeft: '1px solid #e5e7eb' }}>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginLeft: 8, paddingLeft: 8, borderLeft: '1px solid #e5e7eb' }}>
           <span style={{ fontSize: 11, color: '#888' }}>排序</span>
           <div style={s.pill(sortBy === 'time')} onClick={() => setSortBy('time')}>时间</div>
           <div style={s.pill(sortBy === 'quality')} onClick={() => setSortBy('quality')}>质量分</div>

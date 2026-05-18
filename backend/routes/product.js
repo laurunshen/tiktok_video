@@ -48,12 +48,22 @@ function extractProductId(input) {
 }
 
 // 从 response 中解析出结构化商品信息
+// TikHub 历史上有两种包装深度：data.data.product_data... 和 data.data.data.product_data...
+// 两种都试，避免 API 包装层数再变时整个站爬不了产品
 function parseProductInfo(data) {
-  const productInfo = data?.data?.product_data?.page_config?.components_map
-    ?.find(c => c.component_name === 'product_info')
-    ?.component_data?.product_info
+  const components =
+    data?.data?.data?.product_data?.page_config?.components_map ||
+    data?.data?.product_data?.page_config?.components_map ||
+    []
+  const productInfoComp = components.find(c => c.component_name === 'product_info')
+  const productInfo = productInfoComp?.component_data?.product_info
 
-  if (!productInfo) throw new Error('无法解析商品信息，请检查链接或 region 是否正确')
+  if (!productInfo) {
+    // 如果 components 找得到但是 product_info 不存在 → 多半是 region 不对（TikTok 返回 error_code: 23002002 "not exist"）
+    const cdErr = productInfoComp?.component_data?.error_message
+    if (cdErr) throw new Error(`商品在该 region 不存在或下架：${cdErr}（试试切换 region，如 US/SG/GB）`)
+    throw new Error('无法解析商品信息，请检查链接或 region 是否正确')
+  }
 
   const model = productInfo.product_model
   const categoryInfo = productInfo.category_info?.recommended_categories || []
@@ -191,7 +201,7 @@ async function fetchWithRetry(productId, region, maxRetries = 3) {
 
 // GET /api/product/fetch?url=xxx&region=SG
 router.get('/fetch', async (req, res) => {
-  const { url, region = 'SG' } = req.query
+  const { url, region = 'US' } = req.query
 
   if (!url) return res.status(400).json({ error: '缺少 url 参数' })
 
