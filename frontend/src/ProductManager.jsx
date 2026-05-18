@@ -5,7 +5,7 @@ const API = '/api'
 // Fallback presets — 仅当产品没有 variants 时使用。有 variants 时优先用产品的 SKU 词表
 const COLOR_PRESETS = ['Warm Beige', 'Black', 'White', 'Nude Pink', 'Brown', 'Red']
 const REGIONS = ['SG', 'US', 'GB', 'MY', 'TH', 'PH', 'VN', 'ID', 'AU']
-const PAGE_SIZE = 24  // 产品图分页
+const PAGE_SIZE = 12  // 产品图分页（一次少渲染点，搭配 thumb 流畅很多）
 
 // normalize for matching: lowercase trim
 const normColor = c => (c || '').trim().toLowerCase()
@@ -121,7 +121,7 @@ function timeAgo(ts) {
   return `${Math.floor(diffSec / 86400)}天前`
 }
 
-function ImageGrid({ urls, colors, onRemove, onSetColor, emptyText, knownColors }) {
+function ImageGrid({ urls, thumbUrls, colors, onRemove, onSetColor, emptyText, knownColors }) {
   if (!urls || urls.length === 0) {
     return <div style={{ ...s.empty, padding: 20, fontSize: 13 }}>{emptyText}</div>
   }
@@ -144,12 +144,16 @@ function ImageGrid({ urls, colors, onRemove, onSetColor, emptyText, knownColors 
       {urls.map((u, i) => {
         const c = colors?.[i] || ''
         const cNorm = normColor(c)
+        // 展示用 thumbUrl，没有则 fallback 原图
+        const displayUrl = (thumbUrls?.[i] && thumbUrls[i].length > 0) ? thumbUrls[i] : u
         // 当前色不在 allOptions 里 → 临时加进去（避免 select 显示空）
         const showInList = c && !allOptions.some(o => normColor(o) === cNorm)
         return (
           <div key={u + i} style={s.thumbWrap}>
             <div style={{ position: 'relative' }}>
-              <img src={u} alt="" style={s.thumb} loading="lazy" />
+              <a href={u} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>
+                <img src={displayUrl} alt="" style={s.thumb} loading="lazy" />
+              </a>
               {onRemove && (
                 <button style={s.rmBtn} onClick={() => onRemove(u)} title="删除">×</button>
               )}
@@ -340,7 +344,7 @@ export default function ProductManager() {
       const r = await fetch(`${API}/product/${selectedId}/images`, { method: 'POST', body: fd })
       const data = await r.json()
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
-      setDetail(d => d ? { ...d, userImageUrls: data.userImageUrls, userImageColors: data.userImageColors, isCurated: true } : d)
+      setDetail(d => d ? { ...d, userImageUrls: data.userImageUrls, userImageColors: data.userImageColors, userImageThumbUrls: data.userImageThumbUrls, isCurated: true } : d)
       await loadList()
       const failedCount = (data.failed || []).length
       if (failedCount > 0) {
@@ -355,7 +359,7 @@ export default function ProductManager() {
     }
   }
 
-  // 给单张图打标
+  // 给单张图打标 — 本地更新 detail 即可，不再 refetch（左侧 colorCounts 滞后无伤大雅，切产品时会刷）
   const handleSetColor = async (url, color) => {
     if (!selectedId) return
     try {
@@ -366,8 +370,23 @@ export default function ProductManager() {
       })
       const data = await r.json()
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
-      await loadDetail(selectedId)
-      await loadList()
+      const trimmed = (color || '').trim()
+      setDetail(d => {
+        if (!d) return d
+        const updateColors = (urls, colors) => {
+          const idx = urls.indexOf(url)
+          if (idx < 0) return colors
+          const next = [...colors]
+          next[idx] = trimmed
+          return next
+        }
+        return {
+          ...d,
+          mainImageColors: updateColors(d.mainImageUrls, d.mainImageColors),
+          detailImageColors: updateColors(d.detailImageUrls, d.detailImageColors),
+          userImageColors: updateColors(d.userImageUrls, d.userImageColors),
+        }
+      })
     } catch (e) {
       showToast(`打标失败：${e.message}`, 'error')
     }
@@ -422,7 +441,7 @@ export default function ProductManager() {
     }
   }
 
-  // 批量打标某个 section 全部图为 color（color='' 即清空）
+  // 批量打标某个 section 全部图为 color（color='' 即清空）— 本地更新 detail，不 refetch
   const handleBulkTag = async (urls, color) => {
     if (!selectedId || urls.length === 0) return
     try {
@@ -433,8 +452,18 @@ export default function ProductManager() {
       })
       const data = await r.json()
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
-      await loadDetail(selectedId)
-      await loadList()
+      const trimmed = (color || '').trim()
+      const urlSet = new Set(urls)
+      setDetail(d => {
+        if (!d) return d
+        const remap = (us, cs) => us.map((u, i) => urlSet.has(u) ? trimmed : (cs[i] || ''))
+        return {
+          ...d,
+          mainImageColors: remap(d.mainImageUrls, d.mainImageColors),
+          detailImageColors: remap(d.detailImageUrls, d.detailImageColors),
+          userImageColors: remap(d.userImageUrls, d.userImageColors),
+        }
+      })
       showToast(`${data.taggedCount} 张图已${color ? `标为 ${color}` : '清除颜色'}`)
     } catch (e) {
       showToast(`批量打标失败：${e.message}`, 'error')
@@ -451,7 +480,7 @@ export default function ProductManager() {
       })
       const data = await r.json()
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
-      setDetail(d => d ? { ...d, userImageUrls: data.userImageUrls } : d)
+      setDetail(d => d ? { ...d, userImageUrls: data.userImageUrls, userImageColors: data.userImageColors, userImageThumbUrls: data.userImageThumbUrls } : d)
       await loadList()
       showToast('已删除')
     } catch (e) {
@@ -510,9 +539,9 @@ export default function ProductManager() {
     : knownColors
 
   // 单个 section 的过滤 + 分页渲染
-  function renderSection({ key, title, subtitle, urls, colors, onRemove, extraAfter }) {
+  function renderSection({ key, title, subtitle, urls, thumbUrls, colors, onRemove, extraAfter }) {
     const norm = c => (c || '').trim().toLowerCase()
-    const all = (urls || []).map((u, i) => ({ u, c: (colors?.[i] || '') }))
+    const all = (urls || []).map((u, i) => ({ u, t: (thumbUrls?.[i] || ''), c: (colors?.[i] || '') }))
     let filtered = all
     if (skuFilter === '__untagged__') filtered = all.filter(x => !x.c.trim())
     else if (skuFilter) {
@@ -524,6 +553,7 @@ export default function ProductManager() {
     const page = Math.min(pages[key] || 1, totalPages)
     const slice = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
     const visibleUrls = slice.map(x => x.u)
+    const visibleThumbs = slice.map(x => x.t)
     const visibleColors = slice.map(x => x.c)
 
     return (
@@ -535,7 +565,7 @@ export default function ProductManager() {
         {filtered.length > 0 && (
           <BulkTagBar onBulk={(c) => handleBulkTag(visibleUrls, c)} knownColors={dropdownVocab} />
         )}
-        <ImageGrid urls={visibleUrls} colors={visibleColors}
+        <ImageGrid urls={visibleUrls} thumbUrls={visibleThumbs} colors={visibleColors}
           onRemove={onRemove} onSetColor={handleSetColor}
           knownColors={dropdownVocab}
           emptyText={all.length === 0 ? (key === 'user' ? '暂无自定义图。下方拖拽或点击添加。' : '无') : '该 SKU 筛选下无图'} />
@@ -685,8 +715,9 @@ export default function ProductManager() {
             {renderSection({
               key: 'user',
               title: '自定义图片',
-              subtitle: 'kie.ai 稳定 URL，永久有效',
-              urls: detail.userImageUrls, colors: detail.userImageColors,
+              subtitle: 'S3 稳定 URL，永久有效',
+              urls: detail.userImageUrls, thumbUrls: detail.userImageThumbUrls,
+              colors: detail.userImageColors,
               onRemove: handleRemoveImage,
               extraAfter: (
                 <ImageDrop onFiles={handleUpload} busy={uploadBusy}
@@ -698,15 +729,17 @@ export default function ProductManager() {
             {renderSection({
               key: 'main',
               title: '爬虫主图',
-              subtitle: 'TikTok CDN，可能 24h 后失效',
-              urls: detail.mainImageUrls, colors: detail.mainImageColors,
+              subtitle: 'S3 稳定 URL（原 TikTok CDN 已落 S3）',
+              urls: detail.mainImageUrls, thumbUrls: detail.mainImageThumbUrls,
+              colors: detail.mainImageColors,
             })}
 
             {renderSection({
               key: 'detail',
               title: '爬虫详情图',
               subtitle: '同上',
-              urls: detail.detailImageUrls, colors: detail.detailImageColors,
+              urls: detail.detailImageUrls, thumbUrls: detail.detailImageThumbUrls,
+              colors: detail.detailImageColors,
             })}
 
             {toast && <div style={s.toast(toast.kind)}>{toast.msg}</div>}

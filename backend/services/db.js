@@ -165,6 +165,10 @@ try { db.exec('ALTER TABLE products ADD COLUMN is_curated INTEGER DEFAULT 0') } 
 try { db.exec('ALTER TABLE products ADD COLUMN main_image_colors TEXT') } catch {}   // 与 main_image_urls 同序的 color JSON array，空串=未标
 try { db.exec('ALTER TABLE products ADD COLUMN detail_image_colors TEXT') } catch {} // 同上，对应 detail_image_urls
 try { db.exec('ALTER TABLE products ADD COLUMN user_image_colors TEXT') } catch {}   // 同上，对应 user_image_urls
+// 与 *_image_urls 同序的 400px thumbnail URL（JSON array）。null/缺失 = 走原图 fallback
+try { db.exec('ALTER TABLE products ADD COLUMN main_image_thumb_urls TEXT') } catch {}
+try { db.exec('ALTER TABLE products ADD COLUMN detail_image_thumb_urls TEXT') } catch {}
+try { db.exec('ALTER TABLE products ADD COLUMN user_image_thumb_urls TEXT') } catch {}
 
 console.log(`[DB] SQLite 已初始化: ${DB_PATH}`)
 
@@ -385,29 +389,49 @@ export function getVideosByJob(jobId) {
 
 // ===== Product 缓存 =====
 
-export function saveProduct(productId, region, productInfo) {
+// thumbUrls 可选：{ main: string[], detail: string[] }，未传则只写 *_image_urls，thumb 列保持原值
+export function saveProduct(productId, region, productInfo, thumbUrls = null) {
   const now = Date.now()
   const exists = db.prepare('SELECT 1 FROM products WHERE product_id = ?').get(productId)
+  const mainThumbsJson = thumbUrls?.main ? JSON.stringify(thumbUrls.main) : null
+  const detailThumbsJson = thumbUrls?.detail ? JSON.stringify(thumbUrls.detail) : null
   if (exists) {
-    db.prepare(`
-      UPDATE products SET
-        product_info = ?, main_image_urls = ?, detail_image_urls = ?,
-        last_used_at = ?, job_count = job_count + 1
-      WHERE product_id = ?
-    `).run(
-      JSON.stringify(productInfo),
-      JSON.stringify(productInfo.mainImageUrls || []),
-      JSON.stringify(productInfo.detailImageUrls || []),
-      now,
-      productId,
-    )
+    // UPDATE：只在 thumbUrls 提供时才覆盖对应 thumb 列（避免清空老数据）
+    if (thumbUrls) {
+      db.prepare(`
+        UPDATE products SET
+          product_info = ?, main_image_urls = ?, detail_image_urls = ?,
+          main_image_thumb_urls = ?, detail_image_thumb_urls = ?,
+          last_used_at = ?, job_count = job_count + 1
+        WHERE product_id = ?
+      `).run(
+        JSON.stringify(productInfo),
+        JSON.stringify(productInfo.mainImageUrls || []),
+        JSON.stringify(productInfo.detailImageUrls || []),
+        mainThumbsJson, detailThumbsJson,
+        now, productId,
+      )
+    } else {
+      db.prepare(`
+        UPDATE products SET
+          product_info = ?, main_image_urls = ?, detail_image_urls = ?,
+          last_used_at = ?, job_count = job_count + 1
+        WHERE product_id = ?
+      `).run(
+        JSON.stringify(productInfo),
+        JSON.stringify(productInfo.mainImageUrls || []),
+        JSON.stringify(productInfo.detailImageUrls || []),
+        now, productId,
+      )
+    }
   } else {
     db.prepare(`
       INSERT INTO products (
         product_id, name, region, product_info,
         main_image_urls, detail_image_urls,
+        main_image_thumb_urls, detail_image_thumb_urls,
         first_seen_at, last_used_at, job_count
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       productId,
       productInfo.name || null,
@@ -415,6 +439,7 @@ export function saveProduct(productId, region, productInfo) {
       JSON.stringify(productInfo),
       JSON.stringify(productInfo.mainImageUrls || []),
       JSON.stringify(productInfo.detailImageUrls || []),
+      mainThumbsJson, detailThumbsJson,
       now, now, 1,
     )
   }
@@ -491,6 +516,7 @@ export function listProducts({ limit = 200, offset = 0 } = {}) {
   const rows = db.prepare(`
     SELECT product_id, name, region, main_image_urls, detail_image_urls, user_image_urls,
            main_image_colors, detail_image_colors, user_image_colors,
+           main_image_thumb_urls, detail_image_thumb_urls, user_image_thumb_urls,
            is_curated, job_count, first_seen_at, last_used_at
     FROM products
     ORDER BY last_used_at DESC
@@ -500,14 +526,19 @@ export function listProducts({ limit = 200, offset = 0 } = {}) {
     const main = r.main_image_urls ? JSON.parse(r.main_image_urls) : []
     const detail = r.detail_image_urls ? JSON.parse(r.detail_image_urls) : []
     const user = r.user_image_urls ? JSON.parse(r.user_image_urls) : []
+    const mainThumbs = r.main_image_thumb_urls ? JSON.parse(r.main_image_thumb_urls) : []
+    const detailThumbs = r.detail_image_thumb_urls ? JSON.parse(r.detail_image_thumb_urls) : []
+    const userThumbs = r.user_image_thumb_urls ? JSON.parse(r.user_image_thumb_urls) : []
     const mainColors = alignColors(main, r.main_image_colors ? JSON.parse(r.main_image_colors) : [])
     const detailColors = alignColors(detail, r.detail_image_colors ? JSON.parse(r.detail_image_colors) : [])
     const userColors = alignColors(user, r.user_image_colors ? JSON.parse(r.user_image_colors) : [])
+    // 列表封面优先用 thumb（轻量），backfill 前 fallback 到原图
+    const coverThumb = mainThumbs[0] || detailThumbs[0] || userThumbs[0] || null
     return {
       productId: r.product_id,
       name: r.name,
       region: r.region,
-      coverImageUrl: main[0] || detail[0] || user[0] || null,  // 列表卡片用
+      coverImageUrl: coverThumb || main[0] || detail[0] || user[0] || null,
       mainImageCount: main.length,
       detailImageCount: detail.length,
       userImageCount: user.length,
@@ -521,10 +552,21 @@ export function listProducts({ limit = 200, offset = 0 } = {}) {
 }
 
 // 取单个产品的完整信息（管理页详情用，user_image_urls 单独返回不合并）
+// thumb URL 数组与对应 url 数组同序对齐；缺失的位置为空串，前端 fallback 到原图
+function alignThumbs(urls, thumbs) {
+  const out = new Array(urls.length).fill('')
+  if (!Array.isArray(thumbs)) return out
+  for (let i = 0; i < urls.length && i < thumbs.length; i++) {
+    out[i] = thumbs[i] || ''
+  }
+  return out
+}
+
 export function getProductFull(productId) {
   const row = db.prepare(`
     SELECT product_id, name, region, product_info, main_image_urls, detail_image_urls,
            user_image_urls, main_image_colors, detail_image_colors, user_image_colors,
+           main_image_thumb_urls, detail_image_thumb_urls, user_image_thumb_urls,
            is_curated, job_count, first_seen_at, last_used_at
     FROM products WHERE product_id = ?
   `).get(productId)
@@ -543,6 +585,9 @@ export function getProductFull(productId) {
     mainImageColors: alignColors(mainUrls, row.main_image_colors ? JSON.parse(row.main_image_colors) : []),
     detailImageColors: alignColors(detailUrls, row.detail_image_colors ? JSON.parse(row.detail_image_colors) : []),
     userImageColors: alignColors(userUrls, row.user_image_colors ? JSON.parse(row.user_image_colors) : []),
+    mainImageThumbUrls: alignThumbs(mainUrls, row.main_image_thumb_urls ? JSON.parse(row.main_image_thumb_urls) : []),
+    detailImageThumbUrls: alignThumbs(detailUrls, row.detail_image_thumb_urls ? JSON.parse(row.detail_image_thumb_urls) : []),
+    userImageThumbUrls: alignThumbs(userUrls, row.user_image_thumb_urls ? JSON.parse(row.user_image_thumb_urls) : []),
     isCurated: !!row.is_curated,
     jobCount: row.job_count,
     firstSeenAt: row.first_seen_at,
@@ -550,15 +595,21 @@ export function getProductFull(productId) {
   }
 }
 
-// 整体覆写 user_image_urls + user_image_colors（保持对齐），自动 is_curated=1
-export function updateProductImages(productId, userImageUrls, userImageColors = null) {
+// 整体覆写 user_image_urls + user_image_colors + user_image_thumb_urls（保持对齐），自动 is_curated=1
+// userImageThumbUrls: 可选，长度需对齐 userImageUrls；缺失用空串补齐（前端 fallback 到原图）
+export function updateProductImages(productId, userImageUrls, userImageColors = null, userImageThumbUrls = null) {
   const urls = userImageUrls || []
   const colors = alignColors(urls, userImageColors || [])
+  const thumbs = alignThumbs(urls, userImageThumbUrls || [])
   const result = db.prepare(`
     UPDATE products SET
-      user_image_urls = ?, user_image_colors = ?, is_curated = 1, last_used_at = ?
+      user_image_urls = ?, user_image_colors = ?, user_image_thumb_urls = ?,
+      is_curated = 1, last_used_at = ?
     WHERE product_id = ?
-  `).run(JSON.stringify(urls), JSON.stringify(colors), Date.now(), productId)
+  `).run(
+    JSON.stringify(urls), JSON.stringify(colors), JSON.stringify(thumbs),
+    Date.now(), productId,
+  )
   return result.changes > 0
 }
 

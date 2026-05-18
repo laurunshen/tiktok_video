@@ -6,7 +6,7 @@ import { existsSync } from 'fs'
 import path from 'path'
 import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
-import { uploadMediaFile } from '../services/media-upload.js'
+import { uploadMediaFile, uploadMediaFileWithThumb } from '../services/media-upload.js'
 import {
   getProductCache, saveProduct, listBenchmarkVideos,
   listProducts, getProductFull, updateProductImages, renameProduct, deleteProduct,
@@ -227,8 +227,9 @@ router.get('/fetch', async (req, res) => {
     ].slice(0, 15) // 最多 15 张避免太慢
     const mainCount = (productInfo.mainImageUrls || []).slice(0, 15).length
 
-    console.log(`[Product] 下载并上传 ${allTikTokUrls.length} 张商品图到 S3 稳定存储...`)
+    console.log(`[Product] 下载并上传 ${allTikTokUrls.length} 张商品图到 S3 稳定存储（含缩略图）...`)
     const stableUrls = []
+    const stableThumbs = []
     for (let i = 0; i < allTikTokUrls.length; i++) {
       try {
         const tmpPath = path.join(os.tmpdir(), `${uuidv4()}.jpg`)
@@ -238,9 +239,10 @@ router.get('/fetch', async (req, res) => {
           headers: { 'User-Agent': 'Mozilla/5.0' },
         })
         await writeFile(tmpPath, dl.data)
-        const url = await uploadMediaFile(tmpPath, `product-${i + 1}.jpg`)
+        const { url, thumbUrl } = await uploadMediaFileWithThumb(tmpPath, `product-${i + 1}.jpg`)
         await unlink(tmpPath).catch(() => {})
         stableUrls.push(url)
+        stableThumbs.push(thumbUrl || '')
         console.log(`  [stable] ${i + 1}/${allTikTokUrls.length} ✅`)
       } catch (e) {
         console.warn(`  [stable] ${i + 1}/${allTikTokUrls.length} ❌ ${e.message}`)
@@ -248,10 +250,13 @@ router.get('/fetch', async (req, res) => {
     }
     productInfo.mainImageUrls = stableUrls.slice(0, mainCount)
     productInfo.detailImageUrls = stableUrls.slice(mainCount)
+    const mainThumbs = stableThumbs.slice(0, mainCount)
+    const detailThumbs = stableThumbs.slice(mainCount)
     console.log(`[Product] 稳定 URL 完成：主图 ${productInfo.mainImageUrls.length} + 详情图 ${productInfo.detailImageUrls.length}`)
 
-    // 写入产品缓存（下次同 productId 24h 内直接命中）
-    try { saveProduct(productId, region, productInfo) } catch (e) { console.warn(`[Product] 缓存写入失败: ${e.message}`) }
+    // 写入产品缓存（下次同 productId 24h 内直接命中），thumb 数组与 url 数组同序
+    try { saveProduct(productId, region, productInfo, { main: mainThumbs, detail: detailThumbs }) }
+    catch (e) { console.warn(`[Product] 缓存写入失败: ${e.message}`) }
 
     res.json({ productId, region, productInfo })
 
@@ -325,11 +330,13 @@ router.post('/:productId/images', upload.array('images', 10), async (req, res) =
 
   const uploadColor = (req.body.color || '').trim()
   const successUrls = []
+  const successThumbs = []
   const failures = []
   for (const f of files) {
     try {
-      const url = await uploadMediaFile(f.path, f.originalname)
+      const { url, thumbUrl } = await uploadMediaFileWithThumb(f.path, f.originalname)
       successUrls.push(url)
+      successThumbs.push(thumbUrl || '')
     } catch (e) {
       failures.push({ name: f.originalname, error: e.message })
     } finally {
@@ -339,12 +346,14 @@ router.post('/:productId/images', upload.array('images', 10), async (req, res) =
 
   const newUserImages = [...product.userImageUrls, ...successUrls]
   const newUserColors = [...product.userImageColors, ...successUrls.map(() => uploadColor)]
-  updateProductImages(productId, newUserImages, newUserColors)
+  const newUserThumbs = [...(product.userImageThumbUrls || []), ...successThumbs]
+  updateProductImages(productId, newUserImages, newUserColors, newUserThumbs)
   res.json({
     added: successUrls,
     failed: failures,
     userImageUrls: newUserImages,
     userImageColors: newUserColors,
+    userImageThumbUrls: newUserThumbs,
   })
 })
 
@@ -450,8 +459,9 @@ router.delete('/:productId/images', express.json(), (req, res) => {
   if (idx < 0) return res.status(404).json({ error: 'URL not found in user_image_urls' })
   const filteredUrls = product.userImageUrls.filter((_, i) => i !== idx)
   const filteredColors = product.userImageColors.filter((_, i) => i !== idx)
-  updateProductImages(productId, filteredUrls, filteredColors)
-  res.json({ userImageUrls: filteredUrls, userImageColors: filteredColors })
+  const filteredThumbs = (product.userImageThumbUrls || []).filter((_, i) => i !== idx)
+  updateProductImages(productId, filteredUrls, filteredColors, filteredThumbs)
+  res.json({ userImageUrls: filteredUrls, userImageColors: filteredColors, userImageThumbUrls: filteredThumbs })
 })
 
 // PATCH /api/product/:productId — body: { name } 重命名

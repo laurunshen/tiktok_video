@@ -133,3 +133,53 @@ export async function uploadMediaFiles(files) {
   }
   return results
 }
+
+// ===== 缩略图流水线 =====
+// 产品图展示场景：原图（用于 Seedance / 大图查看）+ 400px thumb（用于前端 grid）
+// 仅供 routes/product.js 的爬虫 / 用户上传两条路径用；视频片段、生成期 transient 图不走这条
+
+const THUMB_MAX_SIDE = 400  // 长边，cover-fit
+const THUMB_QUALITY = 80
+
+// 输入：原图文件路径；输出：thumb 的 Buffer（始终 jpeg）
+async function generateThumb(filePath) {
+  const buf = await sharp(filePath)
+    .rotate()  // 尊重 EXIF orientation
+    .resize(THUMB_MAX_SIDE, THUMB_MAX_SIDE, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: THUMB_QUALITY, mozjpeg: true })
+    .toBuffer()
+  return buf
+}
+
+// 同时上传原图 + thumb，返回 { url, thumbUrl }。thumb 上传失败不阻塞原图（thumbUrl=null fallback）
+export async function uploadMediaFileWithThumb(filePath, originalName) {
+  const url = await uploadWithRetry(filePath, originalName)
+  let thumbUrl = null
+  try {
+    const thumbBuf = await generateThumb(filePath)
+    // thumb 文件名 = 原图 uuid + _thumb.jpg（从 url 反推 uuid 较脆弱，所以另起一个 uuid）
+    const thumbName = `${uuidv4()}_thumb.jpg`
+    thumbUrl = await uploadBufferToS3(thumbBuf, thumbName, 'image/jpeg')
+  } catch (e) {
+    console.warn(`  [thumb] 生成/上传失败（fallback 用原图）: ${e.message}`)
+  }
+  return { url, thumbUrl }
+}
+
+// 批量版，CONCURRENCY 并发，返回 [{ index, url, thumbUrl, originalname }, ...]
+export async function uploadMediaFilesWithThumb(files) {
+  const results = new Array(files.length)
+  for (let i = 0; i < files.length; i += CONCURRENCY) {
+    const batch = files.slice(i, i + CONCURRENCY)
+    const batchResults = await Promise.all(
+      batch.map(async (file, batchIdx) => {
+        const index = i + batchIdx
+        const { url, thumbUrl } = await uploadMediaFileWithThumb(file.path, file.originalname)
+        console.log(`  [s3 upload+thumb] ${index + 1}/${files.length} ✅ ${url.split('/').pop()}`)
+        return { index, url, thumbUrl, originalname: file.originalname }
+      })
+    )
+    batchResults.forEach(r => { results[r.index] = r })
+  }
+  return results
+}
