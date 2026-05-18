@@ -6,10 +6,10 @@ import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import axios from 'axios'
 
+// 用 AI Studio API key 直连（key 绑定到 GCP 项目 eternal-concept-492907-q3，仍烧 Cloud 赠金）
+// 之前走 Vertex（user-account ADC）会因 RAPT 政策每隔 16h-几周强制重登 → 已弃
 const genai = new GoogleGenAI({
-  vertexai: true,
-  project: 'eternal-concept-492907-q3',
-  location: 'global',
+  apiKey: process.env.GEMINI_API_KEY,
   httpOptions: { timeout: 900000 }, // 15分钟，给足多图分析时间（产品图越多 Gemini 理解越准确）
 })
 
@@ -84,8 +84,14 @@ Hands have exactly 5 fingers in natural positions. No fused/extra/missing finger
 [NO IMPROVISED DIALOGUE]
 The presenter speaks ONLY the exact lines in SHOT SEQUENCE. NO "link in bio", "okay bye", "thanks for watching" or other ad-libbed closers.
 
-[NO MIRROR FLIP — anti-shortcut for shot variation]
-When SHOT SEQUENCE asks for a new camera angle, render an actual rotated body / different framing. NEVER achieve "different angle" by horizontally flipping a previous frame — that visibly swaps background props (lamp on left becomes lamp on right) and hair parting (left part becomes right part), breaking spatial continuity. Same room, same camera position, presenter actually rotates her body in 3D.
+[NO MIRROR FLIP — anti-shortcut for shot variation, CRITICAL]
+Horizontally mirroring a previous frame is the #1 way the model cheats when given "another angle / different view / turn". DO NOT do this. Detection cues that EVERY shot must keep CONSISTENT (any flip = failure):
+  • The asymmetric face mole / freckle stays on the SAME cheek across all shots
+  • The hair parting stays on the SAME side (left part stays left)
+  • The higher eyebrow stays on the SAME side
+  • Any wall art / lamp / window / pillow stays on the SAME side of frame
+  • Any visible asymmetric clothing detail (logo / bow / contrast trim) stays on the SAME side
+If the SHOT SEQUENCE asks for "another angle", produce a genuine 3D-rotated body in the SAME room with the SAME camera position — never a horizontal flip. If a true rotation can't render cleanly, change the shot to "same camera angle, different action or expression" instead.
 `.trim()
 
 async function imageToInlinePart(filePath, originalName) {
@@ -383,7 +389,16 @@ TONE: Match pass1Result.narrative_dna.tone_register. Pick the matching delivery 
   • DEADPAN_FUNNY — flat affect with comedic timing, slight pause before punch lines
   • TEACHER_EDUCATIONAL — clear articulation, slight pauses to let info land, "let me show you" energy
 Natural speech patterns appropriate to the tone.
-NOT a broadcaster voice.
+
+ANTI-BROADCASTER (CRITICAL — the #1 reason AI videos sound machine-generated):
+SPEAKING RATE matches the reference video (do NOT force fast; do NOT force slow). BUT no matter the rate, the CADENCE must be conversational human, NEVER broadcaster.
+KILL these robotic patterns:
+  • Over-articulated consonants (crisp Ts and Ds at every word) — NO. Let endings soften and slur.
+  • Even rhythm on every word — NO. Stress 1-2 keywords per sentence, let other words run together.
+  • Formal mid-sentence pauses ("the . product . is . amazing") — NO. Run clauses together; pause only between thoughts.
+  • Uniform pitch contour ending each sentence flat — NO. Drop / rise / trail off unpredictably.
+  • Perfect grammar / textbook diction — NO. Allow contractions, mild filler ("like", "you know"), occasional self-correction.
+TARGET: sounds like a real person recording on her phone in one take — comfortable, slightly imperfect, with natural micro-hesitations and uneven word stress. NOT a TV anchor reading copy.
 
 [AVOID]
 No static images in video. No shots without a person. No gimbal. No harsh one-sided lighting. No airbrushed skin. No model poses. No slow delivery. No invented lines. No @Image references in video content.
@@ -540,6 +555,7 @@ Required fields (use null if not visible):
   Output ONE phrase only. Never combine two from this list.
 - structure: underwire / wireless, padded / unlined, molded cup / soft cup
 - construction: lace panels / smooth seamless / bonded edges / visible seams / mesh inserts
+  IMPORTANT: "smooth seamless" means NO stitching ANYWHERE on the garment — including cup edges and band edges. If you can see ANY stitched hem, picot border, or topstitching in the images, do NOT use "smooth seamless" — pick "visible seams" or another option that allows stitching.
 - edge_finish: How are the cup and band edges finished? Choose the MOST accurate.
   CRITICAL ASSUMPTION RULE: When you cannot clearly tell from the images, DEFAULT to "narrow folded fabric hem with low-profile stitching". Reason: 90%+ of e-commerce bras have folded stitched hems; truly seamless laser-cut edges are RARE and only appear on premium technical fabrics. False-negative-stitching (claiming seamless when there's actually a hem) causes the AI to render a structurally wrong garment. False-positive-stitching (claiming hem when actually seamless) only adds a barely-visible thin line. Always err toward "stitched hem" if uncertain.
   Choose ONE:
@@ -550,6 +566,16 @@ Required fields (use null if not visible):
   • "visible sewn trim / picot edge — decorative stitched border visible on cup or band"
   • "thick bound edge — clearly raised folded fabric trim with visible topstitching"
   Be precise: this field directly controls whether visible stitching, trim, or thick edges appear in the generated video.
+
+- CROSS-CHECK construction ↔ edge_finish (do this AFTER picking both fields; MANDATORY):
+  These two fields describe the same physical garment and MUST NOT contradict. Apply this rule and fix construction if it conflicts (edge_finish is more directly observable from images and has a strong default — trust edge_finish, adjust construction):
+  • If edge_finish is any STITCHED option ("narrow folded fabric hem with low-profile stitching" / "visible sewn trim / picot edge" / "thick bound edge"):
+      → construction MUST NOT be "smooth seamless". A seamless garment cannot have stitched/folded/bound edges. Change construction to "visible seams" or "lace panels" — whichever better matches the actual fabric.
+  • If construction = "smooth seamless":
+      → edge_finish MUST be "laser-cut flat edges" OR "narrow bonded edge" (the two non-stitched options). If you wrote a stitched edge_finish, that means construction was wrong — change construction to "visible seams".
+  • If construction = "lace panels" OR "mesh inserts":
+      → edge_finish MUST NOT be "laser-cut flat edges". Lace and mesh have stitched perimeters — pick a stitched edge_finish.
+  Your final construction and edge_finish output MUST satisfy all three rules above. Pass 2 will fail the job if they contradict.
 - underwire_profile: How prominent is the underwire channel? Choose:
   • "invisible underwire — channel completely hidden within seamless fabric, no visible ridge"
   • "low-profile channel — subtle gentle ridge, blends into fabric"
@@ -739,41 +765,133 @@ async function prepareImageParts({ imageFiles, productImageUrls, imageUrls }) {
   }
 
   if (remoteImages.length > 0) {
-    console.log(`  [Gemini] 下载 ${remoteImages.length} 张远程产品图...`)
+    const t0 = Date.now()
+    console.log(`  [Gemini] 下载 ${remoteImages.length} 张远程产品图（并发 4）...`)
     const { default: sharp } = await import('sharp')
+    const CONCURRENCY = 4
+    const results = new Array(remoteImages.length)
+    let cursor = 0
+    await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
+      while (true) {
+        const i = cursor++
+        if (i >= remoteImages.length) return
+        const idx = localImages.length + i + 1
+        try {
+          const imgRes = await axios.get(remoteImages[i], {
+            responseType: 'arraybuffer',
+            timeout: 30000,
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+          })
+          let buf = await sharp(Buffer.from(imgRes.data))
+            .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
+            .jpeg({ quality: 80 })
+            .toBuffer()
+          if (buf.length > GEMINI_IMAGE_MAX_BYTES) {
+            buf = await sharp(buf).jpeg({ quality: 60 }).toBuffer()
+          }
+          const inlinePart = {
+            inlineData: { mimeType: 'image/jpeg', data: buf.toString('base64') },
+          }
+          results[i] = { ok: true, idx, inlinePart }
+        } catch (e) {
+          console.warn(`  [Gemini] 图片 ${idx} 下载失败: ${e.message}`)
+          results[i] = { ok: false }
+        }
+      }
+    }))
+    // 按原顺序写回，保持 idx 编号稳定
     for (let i = 0; i < remoteImages.length; i++) {
+      const r = results[i]
       const idx = localImages.length + i + 1
-      try {
-        const imgRes = await axios.get(remoteImages[i], {
-          responseType: 'arraybuffer',
-          timeout: 30000,
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-        })
-        let buf = await sharp(Buffer.from(imgRes.data))
-          .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
-          .jpeg({ quality: 80 })
-          .toBuffer()
-        if (buf.length > GEMINI_IMAGE_MAX_BYTES) {
-          buf = await sharp(buf).jpeg({ quality: 60 }).toBuffer()
-        }
-        const inlinePart = {
-          inlineData: { mimeType: 'image/jpeg', data: buf.toString('base64') },
-        }
-        labelParts.push({
-          idx,
-          labelText: `[Image ${idx}: from product listing]`,
-          inlinePart,
-        })
-        inlinePartByIndex[idx] = inlinePart
+      if (r && r.ok) {
+        labelParts.push({ idx, labelText: `[Image ${idx}: from product listing]`, inlinePart: r.inlinePart })
+        inlinePartByIndex[idx] = r.inlinePart
         imageOrigins.push({ source: 'remote', sourceUrl: remoteImages[i] })
-      } catch (e) {
-        console.warn(`  [Gemini] 图片 ${idx} 下载失败: ${e.message}`)
+      } else {
         imageOrigins.push({ source: 'remote', sourceUrl: remoteImages[i], failed: true })
       }
     }
+    console.log(`  [Gemini] 远程图下载完成 ${((Date.now() - t0) / 1000).toFixed(1)}s`)
   }
 
   return { labelParts, imageOrigins, totalImages, inlinePartByIndex }
+}
+
+// 当用户提供 ≥6 张同 SKU 图时，Seedance 已有充足视觉 ground truth；
+// 此时可以省掉 edge_finish/underwire_profile/fabric_drape/construction 这种"靠图看更准"的字段
+// 既减少 Pass 1 prompt 量（~2700 字符），又消除 construction ↔ edge_finish 矛盾源（阶段 4 20% 失败率根因）
+const SLIM_IMAGE_THRESHOLD = 6
+
+function buildTask2bText(slimMode) {
+  const silhouetteEnum = `  Pick from these mutually-exclusive silhouettes:
+  • "deep V plunge with center gore well below cleavage line" (V-shape neckline going low between breasts)
+  • "demi cup with horizontal neckline cutting across the upper bust" (straight horizontal cut, wide-set straps)
+  • "balconette with squared/rectangular neckline and wide-set straps" (similar to demi but more rectangular)
+  • "full coverage with rounded scoop neckline"
+  • "high-neck / halter neckline"
+  • "triangle bralette with V-shaped triangular cups and minimal coverage"
+  • "sports bra band / pullover style"
+  Output ONE phrase only. Never combine two from this list.`
+
+  if (slimMode) {
+    return `TASK 2b - KEY VISUAL FEATURES (SLIM mode — ≥${SLIM_IMAGE_THRESHOLD} reference images available, focus on essentials only):
+Look at the product images carefully. Describe ONLY what you actually see.
+Required fields (use null if not visible):
+- silhouette: overall shape — describe what the bra LOOKS LIKE in the images, NOT what the product NAME says (product names often combine incompatible terms like "Demi Balconette Plunge"; pick ONE from below that matches the hero shot).
+${silhouetteEnum}
+- structure: underwire / wireless, padded / unlined, molded cup / soft cup (short phrase)
+- straps: width, adjustability, color, racerback / standard / convertible
+- closure: hook-and-eye rows count / front-clasp / pullover (short phrase)
+- fabric_visual: one phrase (e.g. "matte microfiber slight sheen", "stretch lace floral pattern")
+- color: PICK EXACTLY ONE color name. NEVER output multiple colors separated by commas/slashes.
+- distinguishing_details: anything that makes this product unique (bow, contrast trim, decorative panels)
+
+SKIPPED in slim mode (output null — reference images give these to video model directly): edge_finish, underwire_profile, fabric_drape, construction.`
+  }
+
+  return `TASK 2b - Describe the product's KEY VISUAL FEATURES (CRITICAL — generated video must match these exactly):
+Look at the product images carefully. Describe ONLY what you actually see — no assumptions.
+Required fields (use null if not visible):
+- silhouette: overall shape — describe what the bra LOOKS LIKE in the images, NOT what the product NAME says.
+  CRITICAL: Product names often contain marketing/SEO terms like "Demi", "Balconette", "Plunge", "Halter", "Bralette", "Push-Up" all bundled together (e.g. "Inbarely Plus Plunge Bra - Sexy Demi Balconette" — this name combines THREE different silhouettes that are physically incompatible). DO NOT copy product name into this field. Pick the ONE silhouette type that matches what you actually see in the hero shot.
+${silhouetteEnum}
+- structure: underwire / wireless, padded / unlined, molded cup / soft cup
+- construction: lace panels / smooth seamless / bonded edges / visible seams / mesh inserts
+  IMPORTANT: "smooth seamless" means NO stitching ANYWHERE on the garment — including cup edges and band edges. If you can see ANY stitched hem, picot border, or topstitching in the images, do NOT use "smooth seamless" — pick "visible seams" or another option that allows stitching.
+- edge_finish: How are the cup and band edges finished? Choose the MOST accurate.
+  CRITICAL ASSUMPTION RULE: When you cannot clearly tell from the images, DEFAULT to "narrow folded fabric hem with low-profile stitching". Reason: 90%+ of e-commerce bras have folded stitched hems; truly seamless laser-cut edges are RARE and only appear on premium technical fabrics. False-negative-stitching (claiming seamless when there's actually a hem) causes the AI to render a structurally wrong garment. False-positive-stitching (claiming hem when actually seamless) only adds a barely-visible thin line. Always err toward "stitched hem" if uncertain.
+  Choose ONE:
+  • "narrow folded fabric hem with low-profile stitching — clean fine stitched edge, minimal bulk" ← DEFAULT when uncertain
+  • "laser-cut flat edges — zero visible stitching, no folded trim, edges lie completely flat against skin" ← only if 100% confirmed by close-up
+  • "narrow bonded edge — thin heat-bonded tape, no thread visible" ← only if 100% confirmed by close-up
+  • "fabric-covered underwire channel — slim channel, mostly hidden, low profile"
+  • "visible sewn trim / picot edge — decorative stitched border visible on cup or band"
+  • "thick bound edge — clearly raised folded fabric trim with visible topstitching"
+  Be precise: this field directly controls whether visible stitching, trim, or thick edges appear in the generated video.
+
+- CROSS-CHECK construction ↔ edge_finish (do this AFTER picking both fields; MANDATORY):
+  These two fields describe the same physical garment and MUST NOT contradict. Apply this rule and fix construction if it conflicts (edge_finish is more directly observable from images and has a strong default — trust edge_finish, adjust construction):
+  • If edge_finish is any STITCHED option ("narrow folded fabric hem with low-profile stitching" / "visible sewn trim / picot edge" / "thick bound edge"):
+      → construction MUST NOT be "smooth seamless". A seamless garment cannot have stitched/folded/bound edges. Change construction to "visible seams" or "lace panels" — whichever better matches the actual fabric.
+  • If construction = "smooth seamless":
+      → edge_finish MUST be "laser-cut flat edges" OR "narrow bonded edge" (the two non-stitched options). If you wrote a stitched edge_finish, that means construction was wrong — change construction to "visible seams".
+  • If construction = "lace panels" OR "mesh inserts":
+      → edge_finish MUST NOT be "laser-cut flat edges". Lace and mesh have stitched perimeters — pick a stitched edge_finish.
+  Your final construction and edge_finish output MUST satisfy all three rules above. Pass 2 will fail the job if they contradict.
+- underwire_profile: How prominent is the underwire channel? Choose:
+  • "invisible underwire — channel completely hidden within seamless fabric, no visible ridge"
+  • "low-profile channel — subtle gentle ridge, blends into fabric"
+  • "standard channel — moderately visible raised channel"
+  • "prominent channel — clearly raised thick seam"
+- fabric_drape: How does the fabric behave against the body?
+  • "second-skin drape — fabric conforms instantly to body contours, no stiff edges, no gaps"
+  • "semi-structured — mostly conforming but cup maintains some shape away from skin"
+  • "structured / stiff — cup holds shape independent of body, visible gap at edges"
+- straps: width, adjustability, color, racerback / standard / convertible
+- closure: hook-and-eye rows count / front-clasp / pullover
+- fabric_visual: how the fabric looks on screen (e.g. "matte microfiber, slight sheen", "stretch lace with floral pattern", "ribbed athletic mesh")
+- color: PICK EXACTLY ONE color name. The product listing may offer multiple variants (Beige / Black / White / Nude Pink etc.) but the video can only show ONE. Look at the product images and identify which color is featured in the HERO/FRONT shots — output ONLY that single color name. NEVER output multiple colors separated by commas/slashes (e.g. "Beige, Black" is WRONG — Seedance will randomly mix). The color you write here is what the video will render.
+- distinguishing_details: anything that makes this product unique (bow, contrast trim, decorative panels, etc.)`
 }
 
 // ==== Pass 1: 分析 ====
@@ -785,6 +903,7 @@ async function geminiPass1Analyze({
   scriptModeInstruction,
   isSameProduct,
   targetDuration,
+  slimMode = false,
 }) {
   const parts = []
   parts.push({
@@ -837,56 +956,16 @@ The product likely has multiple color variants in the images (e.g. beige, black,
   • If multiple colors appear equally, pick the most photogenic neutral (beige > nude > white > black)
   • Output this single color name in the dominant_color field below
 
-STEP 2.2 — Select 5-9 images with STRONG color bias toward dominant_color:
-  • PREFER dominant_color images. Aim for 6-8 dominant-color images.
-  • At MOST 1 non-dominant-color image, AND only if it shows a critical structural angle (e.g. back closure) that no dominant-color image covers. If all critical angles ARE covered by dominant-color images, do NOT include any non-dominant-color image.
-  • IGNORE images that are mainly a marketing poster with large text overlays (e.g. "Inbarely Plus Collection" headline, "Double Layer Fabric" callout) — those text elements pollute the video model. Only include them if they are the ONLY way to show a critical product detail.
-  • Each selected image gets a role label in image_color_role: either "dominant-color" or "structure-only-different-color".
+STEP 2.2 — Select 5-9 images, ALL of dominant_color (zero exceptions):
+  • EVERY selected image MUST be dominant_color. If a candidate image is a different color, DO NOT select it — even if it shows a critical structural angle that no dominant-color image covers. Better to miss an angle than to contaminate the video model with the wrong color.
+  • IGNORE images that are mainly a marketing poster with large text overlays — those text elements pollute the video model.
+  • All entries in image_color_role MUST be "dominant-color". The "structure-only-different-color" label is DEPRECATED and must not be used.
 
-WHY THIS MATTERS: The video model is visual-first — if you include a black-color image to show "structural reference only", the model will sometimes render the bra in black anyway. Color bias in image selection is the strongest defense against color contamination.
+WHY THIS MATTERS: The video model is visual-first — ANY non-dominant-color reference image risks the model rendering that color in some frame. Zero off-color images is the only reliable defense.
 
 Return indices (1-based) and the role array. Pass 2 will only see selected images.
 
-TASK 2b - Describe the product's KEY VISUAL FEATURES (CRITICAL — generated video must match these exactly):
-Look at the product images carefully. Describe ONLY what you actually see — no assumptions.
-Required fields (use null if not visible):
-- silhouette: overall shape — describe what the bra LOOKS LIKE in the images, NOT what the product NAME says.
-  CRITICAL: Product names often contain marketing/SEO terms like "Demi", "Balconette", "Plunge", "Halter", "Bralette", "Push-Up" all bundled together (e.g. "Inbarely Plus Plunge Bra - Sexy Demi Balconette" — this name combines THREE different silhouettes that are physically incompatible). DO NOT copy product name into this field. Pick the ONE silhouette type that matches what you actually see in the hero shot.
-  Pick from these mutually-exclusive silhouettes:
-  • "deep V plunge with center gore well below cleavage line" (V-shape neckline going low between breasts)
-  • "demi cup with horizontal neckline cutting across the upper bust" (straight horizontal cut, wide-set straps)
-  • "balconette with squared/rectangular neckline and wide-set straps" (similar to demi but more rectangular)
-  • "full coverage with rounded scoop neckline"
-  • "high-neck / halter neckline"
-  • "triangle bralette with V-shaped triangular cups and minimal coverage"
-  • "sports bra band / pullover style"
-  Output ONE phrase only. Never combine two from this list.
-- structure: underwire / wireless, padded / unlined, molded cup / soft cup
-- construction: lace panels / smooth seamless / bonded edges / visible seams / mesh inserts
-- edge_finish: How are the cup and band edges finished? Choose the MOST accurate.
-  CRITICAL ASSUMPTION RULE: When you cannot clearly tell from the images, DEFAULT to "narrow folded fabric hem with low-profile stitching". Reason: 90%+ of e-commerce bras have folded stitched hems; truly seamless laser-cut edges are RARE and only appear on premium technical fabrics. False-negative-stitching (claiming seamless when there's actually a hem) causes the AI to render a structurally wrong garment. False-positive-stitching (claiming hem when actually seamless) only adds a barely-visible thin line. Always err toward "stitched hem" if uncertain.
-  Choose ONE:
-  • "narrow folded fabric hem with low-profile stitching — clean fine stitched edge, minimal bulk" ← DEFAULT when uncertain
-  • "laser-cut flat edges — zero visible stitching, no folded trim, edges lie completely flat against skin" ← only if 100% confirmed by close-up
-  • "narrow bonded edge — thin heat-bonded tape, no thread visible" ← only if 100% confirmed by close-up
-  • "fabric-covered underwire channel — slim channel, mostly hidden, low profile"
-  • "visible sewn trim / picot edge — decorative stitched border visible on cup or band"
-  • "thick bound edge — clearly raised folded fabric trim with visible topstitching"
-  Be precise: this field directly controls whether visible stitching, trim, or thick edges appear in the generated video.
-- underwire_profile: How prominent is the underwire channel? Choose:
-  • "invisible underwire — channel completely hidden within seamless fabric, no visible ridge"
-  • "low-profile channel — subtle gentle ridge, blends into fabric"
-  • "standard channel — moderately visible raised channel"
-  • "prominent channel — clearly raised thick seam"
-- fabric_drape: How does the fabric behave against the body?
-  • "second-skin drape — fabric conforms instantly to body contours, no stiff edges, no gaps"
-  • "semi-structured — mostly conforming but cup maintains some shape away from skin"
-  • "structured / stiff — cup holds shape independent of body, visible gap at edges"
-- straps: width, adjustability, color, racerback / standard / convertible
-- closure: hook-and-eye rows count / front-clasp / pullover
-- fabric_visual: how the fabric looks on screen (e.g. "matte microfiber, slight sheen", "stretch lace with floral pattern", "ribbed athletic mesh")
-- color: PICK EXACTLY ONE color name. The product listing may offer multiple variants (Beige / Black / White / Nude Pink etc.) but the video can only show ONE. Look at the product images and identify which color is featured in the HERO/FRONT shots — output ONLY that single color name. NEVER output multiple colors separated by commas/slashes (e.g. "Beige, Black" is WRONG — Seedance will randomly mix). The color you write here is what the video will render.
-- distinguishing_details: anything that makes this product unique (bow, contrast trim, decorative panels, etc.)
+${buildTask2bText(slimMode)}
 
 TASK 2c - Identify the BEST 15-second segment of the reference video.
 Pick the segment with the highest information density: presenter on camera + product visible + key actions.
@@ -1000,6 +1079,7 @@ Return ONLY this valid JSON, no markdown fences, no explanation:
   const response = await genai.models.generateContent({
     model: 'gemini-3.1-pro-preview',
     contents: [{ role: 'user', parts }],
+    config: { temperature: 0 },
   })
   console.log(`  [Gemini Pass 1] 完成（${((Date.now() - t0) / 1000).toFixed(1)}s）`)
 
@@ -1029,24 +1109,24 @@ async function geminiPass2WritePrompt({
   category,
   userDescription,
   variantRecipe,  // 可选：{label, presenter, scene, cardigan_color}，用于裂变
+  slimMode = false,
 }) {
   const dialogueRule = isSameProduct
     ? `1. SPOKEN DIALOGUE: Use the compressed_script verbatim from PASS 1 ANALYSIS. Distribute it across the SHOT SEQUENCE shots, preserving the exact wording.`
     : `1. SPOKEN DIALOGUE: Use the compressed_script verbatim from PASS 1 ANALYSIS as the dialogue. It was already written fresh based on this product.`
 
-  const task3Lingerie = `
-TASK 3 - Generate a Seedance2 prompt. [CATEGORY: LINGERIE / SHAPEWEAR]
-
-CRITICAL RULES:
-${dialogueRule}
-2. DO NOT reference @ImageN or insert static images in the shot sequence. Product images are for your reference only — use them to write accurate ACTION descriptions. The video must show a REAL PERSON PERFORMING ACTIONS.
-3. The presenter wears the product throughout. Use TWO distinct looks cut between via edits (NOT in-frame undressing).
-4. Speaking pace: FAST and energetic. Pack lines tightly — minimal pauses between sentences.
-
-Use this FIXED STRUCTURE:
-
----
-[PRODUCT VISUAL ANCHOR — READ THIS FIRST. Every frame of the video must be consistent with these specs. This is the highest-priority constraint.]
+  // PRODUCT VISUAL ANCHOR 块 — slim 模式（≥6 张同 SKU 图）只列必要字段，省 ~300 字符且消除矛盾源
+  const productAnchorBlock = slimMode
+    ? `[PRODUCT VISUAL ANCHOR — READ THIS FIRST. Every frame of the video must be consistent with these specs.]
+Silhouette: <copy verbatim from product_visual_features.silhouette>
+Structure: <copy verbatim from product_visual_features.structure>
+Straps: <copy verbatim from product_visual_features.straps>
+Closure: <copy verbatim from product_visual_features.closure>
+Fabric look: <copy verbatim from product_visual_features.fabric_visual>
+Color: <copy verbatim from product_visual_features.color>
+Distinguishing details: <copy verbatim from product_visual_features.distinguishing_details>
+[Note: edge finish / underwire / fabric drape / construction are inferred from the ${selectedImageParts.length} reference images attached — do NOT add text guesses.]`
+    : `[PRODUCT VISUAL ANCHOR — READ THIS FIRST. Every frame of the video must be consistent with these specs. This is the highest-priority constraint.]
 Silhouette: <copy verbatim from product_visual_features.silhouette>
 Structure: <copy verbatim from product_visual_features.structure>
 Construction: <copy verbatim from product_visual_features.construction>
@@ -1058,7 +1138,21 @@ Closure: <copy verbatim from product_visual_features.closure>
 Fabric look: <copy verbatim from product_visual_features.fabric_visual>
 Color: <copy verbatim from product_visual_features.color>
 Distinguishing details: <copy verbatim from product_visual_features.distinguishing_details>
-Required visual outcome: <write 1-3 plain declarative sentences describing — based on the actual edge_finish/underwire_profile/fabric_drape values for THIS product — what the cups, band edges, and underwire should literally look like in the video. Examples: "Cups have flat laser-cut edges with no visible stitching or folded trim." / "Underwire sits inside an invisible channel with no raised ridge." / "Fabric drapes as a second skin, cup edges flush against the body." DO NOT write conditional logic. Resolve the conditions yourself based on this product's anchor values and write the final outcome as plain statements. Video models ignore if/then logic and will blend all keywords from both branches, causing hallucinations.>
+Required visual outcome: <write 1-3 plain declarative sentences describing — based on the actual edge_finish/underwire_profile/fabric_drape values for THIS product — what the cups, band edges, and underwire should literally look like in the video. Examples: "Cups have flat laser-cut edges with no visible stitching or folded trim." / "Underwire sits inside an invisible channel with no raised ridge." / "Fabric drapes as a second skin, cup edges flush against the body." DO NOT write conditional logic. Resolve the conditions yourself based on this product's anchor values and write the final outcome as plain statements. Video models ignore if/then logic and will blend all keywords from both branches, causing hallucinations.>`
+
+  const task3Lingerie = `
+TASK 3 - Generate a Seedance2 prompt. [CATEGORY: LINGERIE / SHAPEWEAR]
+
+CRITICAL RULES:
+${dialogueRule}
+2. DO NOT reference @ImageN or insert static images in the shot sequence. Product images are for your reference only — use them to write accurate ACTION descriptions. The video must show a REAL PERSON PERFORMING ACTIONS.
+3. The presenter wears the product throughout. If the reference's SHOT SEQUENCE specifies an outfit switch (cardigan on→off), use clean edit cuts between looks (NOT in-frame undressing). If reference is single-outfit, keep the same outfit throughout.
+4. Speaking pace: match what the reference shows. Do NOT force "FAST and energetic" if the reference is calm/measured/intimate.
+
+Use this FIXED STRUCTURE:
+
+---
+${productAnchorBlock}
 
 [COLOR — only <DOMINANT_COLOR>]
 The bra is <DOMINANT_COLOR> in every frame. OUTFIT must say "<DOMINANT_COLOR> bra"; OPENING LINE must include the color; mention "<DOMINANT_COLOR>" in SHOT SEQUENCE at least 2 more times. NEVER write "any color" or alternate color names.
@@ -1072,105 +1166,75 @@ Based on product images: <note key visible details — fabric color, texture, st
 [PRESENTER — used IDENTICALLY in both LOOK A and LOOK B]
 Real everyday person, NOT a model or influencer.
 <Fill in: age range, body type, hair color, skin tone with natural features — visible pores, possible freckles, natural texture. NOT "flawless".>
+ANTI-AI-FACE — face MUST have asymmetric human imperfection. Pick 2-3 of these (NEVER all symmetric/perfect):
+  • one eyebrow sits slightly higher than the other
+  • a single small beauty mark or freckle on cheek or near lip (only ONE side)
+  • slight nose tip asymmetry (tilted slightly to one side)
+  • uneven lower lash density (one side fuller)
+  • faint under-eye shadow more visible on ONE side
+  • lips slightly fuller on one side / one corner sits higher when neutral
+  • slight smile-line asymmetry (one cheek dimples deeper)
+DO NOT generate "perfect symmetric model face". AI symmetry is the #1 tell — kill it.
+ANTI-AI-BODY — the chest/bust is the focal point of a bra video and the #1 place AI looks fake. Enforce:
+  • Natural soft asymmetry — the two sides of the bust are slightly different in shape/position (real bodies are never perfectly mirrored). NEVER perfectly symmetric.
+  • Real skin on chest/décolletage — visible pores, faint natural texture, subtle natural tan/skin-tone variation. NOT airbrushed, NOT plastic-doll smooth, NOT glowing.
+  • Soft directional shadow under the bust and along the neckline — gives real volume. NOT flat even CGI lighting.
+  • The bra cup meets skin with a believable soft contact line — NO glowing edge, NO melting/blurring where fabric meets skin, NO fabric-into-skin bleed.
+  • Natural breast physics — soft, gravity-affected, NOT gravity-defying spherical "implant" shape, NOT exaggerated.
+  • Camera framing on the chest stays MEDIUM (waist-up or chest-up). AVOID extreme tight cleavage close-ups — that magnifies every AI artifact (this overrides any "close-up of the cups" instruction from shot_sequence; replace with a medium framing that still shows the bra clearly).
 HAIR — IMPORTANT: hair must be PULLED AWAY from the chest area to keep the bra straps and neckline fully visible. Use one of: high ponytail / low ponytail / messy bun / topknot / hair clipped back / hair tucked securely behind both shoulders. NEVER "long loose hair" / "long hair flowing over chest" / "long hair down" — loose long hair occluding the chest causes severe AI rendering artifacts (flickering between hair and straps, melting hair-on-fabric textures, distorted neckline geometry).
-MAKEUP & ACCESSORIES — to ensure character consistency between shots, the presenter wears:
-  • NO necklaces, NO earrings, NO rings, NO bracelets, NO watches — bare neck and ears throughout
-  • Minimal natural makeup ONLY: clean skin, neutral lip tint (NEVER bold red lipstick, NEVER glossy lipstick), light or no eye makeup
-  • Same hairstyle in every shot — never changes between LOOK A and LOOK B
-  • Same skin tone, same face shape, same body proportions in every frame
-Warm, relaxed energy. Talks fast like she's sharing a secret with a friend.
+MAKEUP & ACCESSORIES (specifics not covered by global character consistency):
+  • NO necklaces, earrings, rings, bracelets, or watches — bare neck and ears throughout
+  • Minimal natural makeup only: clean skin, neutral lip tint (NEVER bold or glossy lipstick), light or no eye makeup
+Warm, relaxed energy. Talks fast like sharing a secret with a friend.
 
-OUTFIT — two looks of THE SAME PERSON (cardigan on/off only):
-- LOOK A: wears the bra WITH an open casual cardigan layered over it.
-- LOOK B: SAME PERSON, SAME hair, SAME makeup, SAME bare neck — cardigan removed, bra fully visible.
+OUTFIT — match what the reference does (see SHOT SEQUENCE block):
+- If the reference shows an outfit change (e.g. cardigan removed mid-video): presenter wears LOOK A (bra + open cardigan over it) before the switch and LOOK B (cardigan removed, bra fully visible) after. SAME PERSON, SAME hair/makeup/bare neck throughout.
+- If the reference is single-outfit (one-take, no outfit change): keep LOOK A (bra + open cardigan) for the entire video. Bra is glimpsed through the open cardigan but never fully revealed.
+- NEVER force A-B-A-B if the reference doesn't have it.
 
 [SHOT SEQUENCE]
 Every shot = a real person doing something. No static images. No product-on-white-background shots.
 
 WORD BUDGET: total dialogue ≤ ${Math.round(targetDuration * 2.8)} words. Distribute the compressed_script across shots, never exceeding the per-shot time × 2.8 words limit. Leave the last 1-2 seconds SILENT or with a gesture/smile.
 
-ACTION SAFETY — Seedance has known weaknesses with complex 3D intersections. NEVER write actions that involve:
-  • Fingers slipping UNDER tight clothing — causes hand-into-fabric distortion
-  • Multi-finger pinching, lifting, or pulling of THIN parts (straps, lace edges) — causes melted/distorted fingers
-  • Hands clipping THROUGH straps or band — melted/floating finger artifacts
-  • Hair flowing over hands or product — hair-fabric merging
-ALWAYS prefer SURFACE-ONLY interactions on LARGE flat areas: single finger or open palm on band/cup surface; turning the body to show silhouette; resting hand flat on collarbone.
+ACTION SAFETY — Seedance fails on these specific actions; avoid all of them: fingers slipping UNDER clothing, multi-finger pinching/pulling of thin straps or lace, hands clipping through straps or band, hair flowing over hands or product. Prefer SURFACE-ONLY contact on large flat areas (single finger or open palm on band/cup, hand resting on collarbone, body turning to show silhouette).
 
-ANTI-LOOPING RULE — When you have two consecutive shots in the same outfit setup, vary the camera angle (side profile, back 3/4 turn, step closer, walk to side). NEVER use horizontal mirror flip to fake a "different angle" — that breaks spatial logic.
+REFERENCE SHOT-BY-SHOT — PASS 1 extracted this shot sequence from the reference video. Use it as the structural skeleton (do NOT replace it with a generic A-B-A-B template):
 
-NARRATIVE STRUCTURE — CRITICAL: This is the most important block. Use the narrative_structure value from PASS 1's narrative_dna to choose how the shots are arranged. The structure should match what made the reference video memorable, NOT a generic A-B-A-B template.
+${pass1Result.video_analysis?.shot_sequence || '(no shot sequence extracted — fall back to a single LOOK A talking-head shot for the full duration)'}
 
-PASS 1 IDENTIFIED:
+REWRITE this reference shot sequence into our SHOT SEQUENCE format following these rules:
+  1. PRESERVE original TIMING — scale the reference's timestamps proportionally to fit ${targetDuration}s total. If reference is 30s and our target is 13s, divide every timestamp by 30/13.
+  2. PRESERVE original ACTIONS — keep what the presenter does each shot. EXCEPTION: if a reference action violates ACTION SAFETY above, replace with the closest SURFACE-ONLY alternative (e.g. "tugs at strap with fingers" → "flat palm rests on strap area").
+  3. PRESERVE original DIALOGUE DISTRIBUTION — use compressed_script lines for each shot following the reference's word-per-shot distribution.
+  4. ADAPT locations/props to a generic indoor home setting (bedroom / living room / bathroom). Do NOT copy the reference's specific location.
+  5. MAP OUTFITS to what the reference does: if the reference shows an outfit change (cardigan on→off) at a specific time, preserve that switch at the same proportional time. If reference is single-outfit one-take, KEEP single-outfit.
+  6. ANTI-MIRROR-FLIP REWRITE (CRITICAL — Seedance frequently cheats here by horizontally flipping the previous frame):
+     • If shot_sequence contains vague phrases like "different angle", "turns to side", "another view", "shows the other side", or just "[different angle of the same outfit]" — REWRITE that shot to "SAME camera angle, presenter does a DIFFERENT specific action".
+     • SAFE substitution examples — hand AWAY from the bra and other thin parts (these are the ONLY hand placements allowed for invented actions):
+       - "raises one hand to chin / cheek / temple, looks slightly down then up"
+       - "tucks loose hair behind one ear"
+       - "lightly touches her own collarbone / neckline area with one fingertip" (above the bra, not on it)
+       - "lets both hands fall to her sides, posture relaxed"
+       - "hand goes out of frame (resting on a counter / hip below frame line)"
+       - "head tilts slightly, soft smile, no hand movement at all"
+       - "looks briefly off-camera to one side then back, hands still"
+     • FORBIDDEN substitutions (ALL violate ACTION SAFETY, do NOT invent these even when trying to avoid mirror-flip):
+       - hand or palm ON the bra cup, band, strap, or underwire
+       - fingers near the bra at all (gap < 1 fist width = forbidden)
+       - hand "demonstrating" the product fit by touching it
+     • If shot_sequence describes a 3D body rotation Seedance can't render cleanly (e.g. "spins 360°", "shows the back"), REPLACE with a SAFE static-camera shot from the safe list above.
+     • Only PRESERVE explicit camera moves the reference clearly does (e.g. "camera follows her walking from bed to mirror" — that's a location change, allowed).
+     • The goal: every cut in our SHOT SEQUENCE must be either (a) a location change, (b) a clear outfit switch, or (c) same camera + a SAFE different action from the list above. NEVER "same camera + slightly turned body" (mirror-flip trap). NEVER "same camera + hand on bra" (anatomy hallucination trap).
+
+DO NOT impose A-B-A-B if the reference doesn't have it. DO NOT add edit cuts the reference doesn't have. DO NOT invent shots not in the reference.
+
+REFERENCE METADATA (use as soft guides when rewriting):
   • hook_type: <copy from pass1Result.narrative_dna.hook_type>
-  • narrative_structure: <copy from pass1Result.narrative_dna.narrative_structure>
   • tone_register: <copy from pass1Result.narrative_dna.tone_register>
-  • unique_creative_signature: <copy from pass1Result.narrative_dna.unique_creative_signature>
-
-WRITE THE SHOT SEQUENCE FOLLOWING THE narrative_structure (pick the matching template below; if none matches exactly, adapt the closest one):
-
-▶ If narrative_structure = "PROBLEM_SOLUTION_DEMO":
-  [0-4s] LOOK A. She rants about the problem with a frustrated/exasperated facial expression. NO product visible yet.
-  [4-7s] LOOK A. Picks up / reveals the product, expression shifts to relief or excitement. Brief talking-head moment.
-  [7-12s] LOOK B. SURFACE-ONLY demo: she shows fit/silhouette, palm flat on band, turns sideways. Voiceover continues.
-  [12-${targetDuration}s] LOOK A or LOOK B. Confident look at camera, smiles, NO ad-libbed CTA — silent satisfied look.
-
-▶ If narrative_structure = "AB_REVEAL":
-  [0-4s] LOOK A. Talking head, faces camera, opens with hook. Front-facing.
-  [4-8s] LOOK B. FRONT-FACING product shot, surface-only action.
-  [8-11s] LOOK A. Cut back to cardigan, talking head, FRONT-FACING.
-  [11-${targetDuration}s] LOOK B. PHYSICALLY DIFFERENT angle (side profile / back 3/4 / step closer — pick ONE; never mirror flip).
-
-▶ If narrative_structure = "ONE_TAKE_WALKTHROUGH":
-  Single continuous shot, NO cuts. Camera follows her as she walks slowly across a room (e.g. from bed to mirror, or along a hallway).
-  Outfit: cardigan stays ON the entire video; bra is glimpsed through open cardigan, never fully bare.
-  She talks the whole time, glancing at camera then around the room. ONE camera setup, no location change.
-  Last 2s: she stops, looks at camera, smiles silently.
-
-▶ If narrative_structure = "GRWM_STYLE":
-  [0-4s] LOOK A. She's doing something else (brushing hair, applying lip balm, making her bed) WHILE talking — multitasking, not looking at camera.
-  [4-9s] LOOK A or LOOK B. Continues the activity, glances at camera mid-task to deliver the key product line.
-  [9-13s] LOOK B. Pauses the activity, focuses on showing the product fit (surface-only).
-  [13-${targetDuration}s] LOOK A. Returns to the original activity, smiles, video ends mid-task feeling natural.
-
-▶ If narrative_structure = "TRY_ON_HAUL":
-  [0-3s] LOOK A. Holds up the bra, says one fast intro line.
-  [3-9s] LOOK B. Shows the product worn — front view, then turns to side. Two distinct phases of the same wearing.
-  [9-13s] LOOK B. Different angle (back 3/4 or step closer) — emphasizes a different feature.
-  [13-${targetDuration}s] LOOK A. Confident result shot, looks at camera, smiles.
-
-▶ If narrative_structure = "SIDE_BY_SIDE_COMPARISON":
-  [0-4s] LOOK A. Holds up the comparison product (e.g. a typical bra) in one hand and OUR product in the other. Talks about the difference.
-  [4-9s] LOOK B. Shows OUR product worn — emphasizes the contrast feature (e.g. seamless edges if comparison was lacy).
-  [9-13s] LOOK A. Returns to the comparison product reference (verbal, e.g. "vs. those").
-  [13-${targetDuration}s] LOOK B. Final confident shot with our product, smile.
-
-▶ If narrative_structure = "DEMO_THEN_TALK":
-  [0-7s] LOOK B. Pure visual demo — NO talking. She walks into frame wearing the bra (with cardigan over it), turns around showing different angles. Quiet ambient room tone.
-  [7-${targetDuration}s] LOOK A. Sits down or stops moving. NOW starts talking, faces camera, delivers the entire script in this one continuous talking-head shot.
-
-▶ If narrative_structure = "TESTIMONIAL_MONOLOGUE":
-  Single LOOK A shot, ONE camera setup, ENTIRE video she's talking to camera. No cuts to LOOK B at all.
-  Camera framing: medium close-up, eye level. She's wearing the cardigan over the bra throughout. Bra straps and partial cup visible through the open cardigan but never fully revealed.
-  She uses hand gestures and slight body shifts for visual variety, but no edit cuts.
-  Last 2s: she nods, smiles, falls silent.
-
-▶ If narrative_structure = "Q&A_SELF_ANSWER":
-  [0-3s] LOOK A. Asks a question to camera (e.g. "Why do I keep buying this bra?").
-  [3-8s] LOOK A. Answers with the first reason while gesturing.
-  [8-12s] LOOK B. Shows the product proving the answer.
-  [12-${targetDuration}s] LOOK A. Final smiling beat.
-
-▶ If narrative_structure = "THREE_REASONS":
-  [0-3s] LOOK A. "Three reasons I love this bra:" — sets up the structure.
-  [3-7s] LOOK A or LOOK B. "First..." — reason 1.
-  [7-11s] LOOK B. "Second..." — reason 2 (shown via product demo).
-  [11-${targetDuration}s] LOOK A or LOOK B. "Third..." — reason 3, ends with smile.
-
-After picking the matching template, REPLACE every <part X of compressed_script> placeholder with actual lines from compressed_script. Distribute the script naturally according to the template's pacing.
-
-PRESERVE THE UNIQUE SIGNATURE: If pass1Result.narrative_dna.unique_creative_signature describes a specific creative element (e.g. "she folds laundry while talking"), incorporate it into the relevant shot — even if it slightly modifies the template above. The unique signature is what makes this video different from a generic AI-generated one.
-
-PRESERVE KEY PHRASES: At least ONE of pass1Result.narrative_dna.key_phrases must appear verbatim in the SHOT SEQUENCE dialogue.
+  • unique_creative_signature: <copy from pass1Result.narrative_dna.unique_creative_signature> — at least one shot must visibly reflect this element.
+  • key_phrases: <copy from pass1Result.narrative_dna.key_phrases as JSON array> — at least ONE of these phrases must appear verbatim in the dialogue.
 
 [STYLE]
 Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.
@@ -1197,15 +1261,20 @@ TONE: Match pass1Result.narrative_dna.tone_register. Pick the matching delivery 
   • DEADPAN_FUNNY — flat affect with comedic timing, slight pause before punch lines
   • TEACHER_EDUCATIONAL — clear articulation, slight pauses to let info land, "let me show you" energy
 Natural speech patterns appropriate to the tone.
-NOT a broadcaster voice.
+
+ANTI-BROADCASTER (CRITICAL — the #1 reason AI videos sound machine-generated):
+SPEAKING RATE matches the reference video (do NOT force fast; do NOT force slow). BUT no matter the rate, the CADENCE must be conversational human, NEVER broadcaster.
+KILL these robotic patterns:
+  • Over-articulated consonants (crisp Ts and Ds at every word) — NO. Let endings soften and slur.
+  • Even rhythm on every word — NO. Stress 1-2 keywords per sentence, let other words run together.
+  • Formal mid-sentence pauses ("the . product . is . amazing") — NO. Run clauses together; pause only between thoughts.
+  • Uniform pitch contour ending each sentence flat — NO. Drop / rise / trail off unpredictably.
+  • Perfect grammar / textbook diction — NO. Allow contractions, mild filler ("like", "you know"), occasional self-correction.
+TARGET: sounds like a real person recording on her phone in one take — comfortable, slightly imperfect, with natural micro-hesitations and uneven word stress. NOT a TV anchor reading copy.
 
 [AVOID]
 No static images in video. No shots without a person. No gimbal. No harsh one-sided lighting. No airbrushed skin. No model poses. No slow delivery. No invented lines. No @Image references in video content.
-PRODUCT ACCURACY — <write 1-2 plain declarative sentences listing what visual features must NOT appear. CRITICAL CONSISTENCY RULE: Only ban features this product DOES NOT HAVE. NEVER ban a feature that PRODUCT VISUAL ANCHOR / product_visual_features says this product DOES have — that creates a self-contradiction that confuses the model. Examples (resolved by product):
-  • For a product with laser-cut edges: "Do not show visible stitched trim, folded hems, or thick bound edges on the cups."
-  • For a product with stitched/folded hems: "Do not show raw unfinished edges or harsh laser-cut lines." (do NOT ban stitching here — this product has stitching)
-  • For a product with invisible underwire: "Do not show a prominent underwire ridge or thick channel seam."
-Cross-check the AVOID list against the ANCHOR before finalizing — if any banned feature is also listed in the ANCHOR as present, REMOVE it from AVOID.>
+PRODUCT ACCURACY — <write 1-2 plain declarative sentences listing visual features that must NOT appear. RULE: Only ban features this product DOES NOT HAVE — never ban a feature listed in PRODUCT VISUAL ANCHOR as present (that creates a self-contradiction). Cross-check AVOID against the ANCHOR before finalizing.>
 PRODUCT INTEGRITY — when the product is shown held in hand or off-body, it must still match the PRODUCT VISUAL ANCHOR exactly: straps in correct positions, closure on the BACK only (never on the front of a back-closure bra), cup count and shape matching the anchor. Do NOT generate distorted, mirror-flipped, or structurally incorrect versions of the product.
 ---`
 
@@ -1318,19 +1387,19 @@ IMPORTANT RULES:
 - Copy product_visual_features values VERBATIM into the [PRODUCT VISUAL ANCHOR] block. Do not paraphrase.
 - Use the compressed_script from PASS 1 as the source of all spoken dialogue — distribute it across SHOT SEQUENCE lines, preserving exact wording.
 - COLOR LOCK: Pass 1 chose dominant_color = "${pass1Result.dominant_color || 'unspecified'}". Replace EVERY occurrence of <DOMINANT_COLOR> in the template with this exact color name. Mention this color at least 3 times across the whole prompt: in [OPENING LINE], [OUTFIT], and [SHOT SEQUENCE]. Never write "any color" or "<color1> or <color2>" — only this single color.
-- NARRATIVE DNA LOCK (CRITICAL — this is what prevents templated/repetitive output):
-  PASS 1 extracted narrative_dna:
+- REFERENCE FIDELITY LOCK (CRITICAL — copies the reference's rhythm/actions/style faithfully):
+  PASS 1 extracted from the reference:
+    • shot_sequence (the actual shot-by-shot breakdown): used as the structural skeleton in [SHOT SEQUENCE] — do NOT replace with a generic A-B-A-B template
     • hook_type: ${pass1Result.narrative_dna?.hook_type || 'unspecified'}
-    • narrative_structure: ${pass1Result.narrative_dna?.narrative_structure || 'unspecified'}
     • tone_register: ${pass1Result.narrative_dna?.tone_register || 'unspecified'}
     • unique_creative_signature: ${pass1Result.narrative_dna?.unique_creative_signature || 'unspecified'}
     • key_phrases: ${JSON.stringify(pass1Result.narrative_dna?.key_phrases || [])}
   REQUIREMENTS:
-  (1) The SHOT SEQUENCE MUST follow the structural template that matches narrative_structure (see SHOT SEQUENCE block for the 10 templates). Do NOT default to "AB_REVEAL" if narrative_structure is something else.
-  (2) The SPEAKING STYLE MUST match tone_register (see SPEAKING STYLE block for the 8 tones). Do NOT default to "EXCITED_BEST_FRIEND" if tone_register is something else.
-  (3) The unique_creative_signature MUST be reflected in the SHOT SEQUENCE — modify shot descriptions to incorporate this specific creative element (e.g. if signature says "she's folding laundry", at least one shot must show this).
-  (4) At least ONE key_phrase MUST appear verbatim in the SHOT SEQUENCE dialogue.
-  This is what makes the generated video DIFFERENT from a generic AI template, even when other variants reuse the same reference. Do NOT skip this.${variantRecipe ? `
+  (1) The [SHOT SEQUENCE] block MUST rewrite the reference's shot_sequence with timing scaled to ${targetDuration}s, actions preserved (unsafe actions replaced per ACTION SAFETY), dialogue distributed per the reference's word distribution. Do NOT impose A-B-A-B if the reference doesn't have it.
+  (2) The [SPEAKING STYLE] block MUST match tone_register (see SPEAKING STYLE block for the 8 tones). Do NOT default to "EXCITED_BEST_FRIEND" if tone_register is something else.
+  (3) The unique_creative_signature MUST be reflected in [SHOT SEQUENCE] — at least one shot must visibly incorporate this specific element (e.g. if signature says "she's folding laundry", at least one shot must show this).
+  (4) At least ONE key_phrase MUST appear verbatim in [SHOT SEQUENCE] dialogue.
+  This is what makes the generated video faithfully echo the reference's style+rhythm+actions while staying physically safe. Do NOT skip this.${variantRecipe ? `
 - VARIANT RECIPE LOCK (this run is variant "${variantRecipe.label}" — used to diversify outputs from the same reference video for TikTok anti-duplicate):
   • PRESENTER block MUST describe exactly: ${variantRecipe.presenter}
   • [STYLE] background MUST be: ${variantRecipe.scene}
@@ -1389,6 +1458,10 @@ export async function analyzeAndGeneratePrompt({
   const { labelParts, imageOrigins, totalImages, inlinePartByIndex } =
     await prepareImageParts({ imageFiles, productImageUrls, imageUrls })
 
+  // 动态精简：≥6 张同 SKU 图时省掉 visual-only 字段（图就是 ground truth）
+  const slimMode = totalImages >= SLIM_IMAGE_THRESHOLD
+  console.log(`  [Gemini] 图数=${totalImages}, slimMode=${slimMode ? 'ON（省 edge/underwire/fabric_drape/construction 4 字段）' : 'OFF（保留完整描述）'}`)
+
   // 2) 公用文本块
   const productInfoText = formatProductInfo(productInfo)
   const scriptModeInstruction = isSameProduct ? `
@@ -1418,6 +1491,7 @@ The reference video is NOT for the same product — it is used as a STYLE REFERE
       scriptModeInstruction,
       isSameProduct,
       targetDuration,
+      slimMode,
     })
 
     // 4) 把 Pass 1 选中的图准备成 Pass 2 的输入（复用 inline part，不重新下载/压缩）
@@ -1448,6 +1522,7 @@ The reference video is NOT for the same product — it is used as a STYLE REFERE
       category,
       userDescription,
       variantRecipe,
+      slimMode,
     })
   } finally {
     // 清理临时视频文件
@@ -1458,12 +1533,16 @@ The reference video is NOT for the same product — it is used as a STYLE REFERE
   const result = {
     video_analysis: pass1Result.video_analysis || {},
     product_visual_features: pass1Result.product_visual_features || {},
+    narrative_dna: pass1Result.narrative_dna || null,  // Pass 1 提取的叙事基因
     key_segment_start_seconds: pass1Result.key_segment_start_seconds,
     key_segment_end_seconds: pass1Result.key_segment_end_seconds,
+    dominant_color: pass1Result.dominant_color || null,
     selected_image_indices: pass1Result.selected_image_indices || [],
+    image_color_role: pass1Result.image_color_role || [],
     compressed_script: pass1Result.compressed_script || '',
     seedance_prompt: pass2Result.seedance_prompt || '',
     reasoning: pass1Result.image_selection_reasoning || '',
+    slim_mode: slimMode,  // 下游 generate.js 用来决定 PRODUCT REMINDER 是否省字段
   }
 
   // 把选中图片编号映射到来源信息（与旧版一致）

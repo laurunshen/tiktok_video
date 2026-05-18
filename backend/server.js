@@ -1,4 +1,17 @@
-import 'dotenv/config'
+import './load-env.js'  // 必须第一个 import，给 process.env 灌入 .env
+
+// 给所有 console.log/warn/error 前缀加 HH:MM:SS.mmm 时间戳。
+// 排查"哪一步慢"必备 —— 多行 message 只在第一行加前缀，可视化对齐。
+for (const lvl of ['log', 'warn', 'error']) {
+  const orig = console[lvl].bind(console)
+  console[lvl] = (...args) => {
+    const d = new Date()
+    const pad = (n, w = 2) => String(n).padStart(w, '0')
+    const ts = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`
+    orig(`[${ts}]`, ...args)
+  }
+}
+
 // 延长 undici 默认超时（@google/genai 用原生 fetch，默认 headersTimeout 5分钟会切断 Gemini 长请求）
 import { Agent, setGlobalDispatcher } from 'undici'
 setGlobalDispatcher(new Agent({

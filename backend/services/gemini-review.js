@@ -12,10 +12,9 @@ import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import axios from 'axios'
 
+// AI Studio API key 直连（详见 gemini.js 注释）
 const genai = new GoogleGenAI({
-  vertexai: true,
-  project: 'eternal-concept-492907-q3',
-  location: 'global',
+  apiKey: process.env.GEMINI_API_KEY,
   httpOptions: { timeout: 600000 }, // 10分钟，二次评估也要带产品图
 })
 
@@ -133,6 +132,7 @@ CLASS A — PRODUCT INACCURACY (will produce a video that misrepresents the prod
      ❌ Anchor says "padded" but images clearly show unlined
      ❌ Brand name in script does not match brand name visible on product packaging in images
      ❌ Self-contradicting descriptions in the same anchor (e.g. "deep V plunge" AND "balconette" — these are different garments)
+     ❌ construction ↔ edge_finish contradiction: "smooth seamless" + any stitched edge_finish (folded hem / picot / bound edge / topstitching) is physically impossible — seamless garments can't have stitched edges. When flagging, the revision instruction MUST tell Gemini: "trust edge_finish, change construction to 'visible seams' or 'lace panels'". Similarly: "lace panels" or "mesh inserts" + "laser-cut flat edges" is impossible (lace/mesh have stitched perimeters).
      ❌ AVOID list bans a feature this product actually has (forces the AI to misrepresent)
    - DO NOT flag critical for: minor wording choices, generic vs specific phrasing, optional details missing.
 

@@ -159,8 +159,35 @@ try { db.exec('ALTER TABLE videos ADD COLUMN diff_judge_overall REAL') } catch {
 try { db.exec('ALTER TABLE videos ADD COLUMN diff_judge_scores TEXT') } catch {}
 try { db.exec('ALTER TABLE videos ADD COLUMN diff_judge_verdict TEXT') } catch {}
 try { db.exec('ALTER TABLE videos ADD COLUMN narrative_dna TEXT') } catch {}        // Pass 1 提取的 narrative_dna JSON
+try { db.exec('ALTER TABLE videos ADD COLUMN poster_url TEXT') } catch {}            // 首帧缩略图 JPG（历史页轻量预览，省 100× 流量）
+try { db.exec('ALTER TABLE products ADD COLUMN user_image_urls TEXT') } catch {}    // 用户手动上传的稳定 kie.ai 图 URL（JSON array）
+try { db.exec('ALTER TABLE products ADD COLUMN is_curated INTEGER DEFAULT 0') } catch {}  // 1 = 用户已加图，缓存不再 24h 过期
+try { db.exec('ALTER TABLE products ADD COLUMN main_image_colors TEXT') } catch {}   // 与 main_image_urls 同序的 color JSON array，空串=未标
+try { db.exec('ALTER TABLE products ADD COLUMN detail_image_colors TEXT') } catch {} // 同上，对应 detail_image_urls
+try { db.exec('ALTER TABLE products ADD COLUMN user_image_colors TEXT') } catch {}   // 同上，对应 user_image_urls
 
 console.log(`[DB] SQLite 已初始化: ${DB_PATH}`)
+
+// 启动时清理僵尸 job：
+//  - status='processing'（Pass1/2/评估/修订阶段）= 纯 in-process 状态，重启后无人接管 → 标 failed
+//  - status='pending'（已进 Seedance 队列）= kie.ai 远端任务还在跑，job.tasks[].taskId 已持久化在 full_data，
+//    /status 轮询会自动 getJob→重新轮询 kie.ai 恢复 → 保留，不要杀
+try {
+  const zombieResult = db.prepare(`UPDATE jobs SET
+    status = 'failed',
+    error_message = COALESCE(error_message, 'backend 重启时进程被杀，job 未恢复（zombie cleanup on boot）')
+    WHERE status = 'processing'
+  `).run()
+  if (zombieResult.changes > 0) {
+    console.log(`[DB] 清理 ${zombieResult.changes} 条僵尸 job（status=processing，重启后不可恢复）`)
+  }
+  const pendingCount = db.prepare(`SELECT COUNT(*) AS c FROM jobs WHERE status = 'pending'`).get().c
+  if (pendingCount > 0) {
+    console.log(`[DB] 保留 ${pendingCount} 条 pending job（Seedance 远端仍在跑，/status 轮询会自动接管）`)
+  }
+} catch (e) {
+  console.warn(`[DB] 僵尸 job 清理失败（不阻塞启动）: ${e.message}`)
+}
 
 // ===== Job 操作 =====
 
@@ -220,23 +247,44 @@ export function getJob(jobId) {
   return row ? JSON.parse(row.full_data) : null
 }
 
-export function listJobs({ limit = 50, offset = 0, status = null } = {}) {
-  let query = 'SELECT job_id, status, step_label, product_id, category, created_at, completed_at, total_ms, error_message FROM jobs'
+export function listJobs({ limit = 50, offset = 0, status = null, sortBy = 'time', published = false, unpublished = false } = {}) {
+  const baseCols = 'j.job_id, j.status, j.step_label, j.product_id, j.category, j.created_at, j.completed_at, j.total_ms, j.error_message'
   const params = []
-  if (status) {
-    query += ' WHERE status = ?'
-    params.push(status)
+  const needJoin = sortBy === 'quality'
+  let query = `SELECT ${needJoin ? `${baseCols}, MAX(v.video_judge_overall) AS _max_score` : baseCols} FROM jobs j`
+  if (needJoin) query += ' LEFT JOIN videos v ON v.job_id = j.job_id'
+  const wheres = []
+  if (status) { wheres.push('j.status = ?'); params.push(status) }
+  if (published) wheres.push('EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = j.job_id AND vp.is_published = 1)')
+  // unpublished = 至少有一个视频 + 没有任何已发布的视频（"完成了但没发"的语义）
+  if (unpublished) {
+    wheres.push('EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = j.job_id)')
+    wheres.push('NOT EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = j.job_id AND vp.is_published = 1)')
   }
-  query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
+  if (wheres.length) query += ' WHERE ' + wheres.join(' AND ')
+  if (needJoin) query += ' GROUP BY j.job_id'
+  if (sortBy === 'quality') {
+    query += ' ORDER BY (_max_score IS NULL), _max_score DESC, j.created_at DESC'
+  } else {
+    query += ' ORDER BY j.created_at DESC'
+  }
+  query += ' LIMIT ? OFFSET ?'
   params.push(limit, offset)
   return db.prepare(query).all(...params)
 }
 
-export function countJobs(status = null) {
-  if (status) {
-    return db.prepare('SELECT COUNT(*) AS c FROM jobs WHERE status = ?').get(status).c
+export function countJobs(status = null, published = false, unpublished = false) {
+  const params = []
+  const wheres = []
+  if (status) { wheres.push('status = ?'); params.push(status) }
+  if (published) wheres.push('EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = jobs.job_id AND vp.is_published = 1)')
+  if (unpublished) {
+    wheres.push('EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = jobs.job_id)')
+    wheres.push('NOT EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = jobs.job_id AND vp.is_published = 1)')
   }
-  return db.prepare('SELECT COUNT(*) AS c FROM jobs').get().c
+  let q = 'SELECT COUNT(*) AS c FROM jobs'
+  if (wheres.length) q += ' WHERE ' + wheres.join(' AND ')
+  return db.prepare(q).get(...params).c
 }
 
 // ===== Video 操作 =====
@@ -244,13 +292,13 @@ export function countJobs(status = null) {
 export function saveVideo(video) {
   const stmt = db.prepare(`
     INSERT OR REPLACE INTO videos (
-      video_id, job_id, video_url, prompt, compressed_script,
+      video_id, job_id, video_url, poster_url, prompt, compressed_script,
       product_visual_features, selected_image_indices, selected_image_urls, dominant_color,
       review_score, review_pass, review_issues, revision_count,
       narrative_dna,
       created_at
     ) VALUES (
-      @video_id, @job_id, @video_url, @prompt, @compressed_script,
+      @video_id, @job_id, @video_url, @poster_url, @prompt, @compressed_script,
       @product_visual_features, @selected_image_indices, @selected_image_urls, @dominant_color,
       @review_score, @review_pass, @review_issues, @revision_count,
       @narrative_dna,
@@ -262,6 +310,7 @@ export function saveVideo(video) {
     video_id: video.videoId,
     job_id: video.jobId,
     video_url: video.videoUrl ?? null,
+    poster_url: video.posterUrl ?? null,
     prompt: video.prompt ?? null,
     compressed_script: video.compressedScript ?? null,
     product_visual_features: video.productVisualFeatures ? JSON.stringify(video.productVisualFeatures) : null,
@@ -277,14 +326,25 @@ export function saveVideo(video) {
   })
 }
 
+// 更新 poster_url（backfill / 后置生成场景）
+export function updateVideoPosterUrl(videoId, posterUrl) {
+  return db.prepare('UPDATE videos SET poster_url = ? WHERE video_id = ?').run(posterUrl, videoId).changes > 0
+}
+
 // 视频生成完成后，更新 video judge 评分（异步调用 Gemini 后写入）
+// reference_match_notes 合并进 scores JSON 一起持久化（避免新加 DB 列）
 export function updateVideoJudge(videoId, judge) {
   if (!judge) return
+  const scoresWithExtras = judge.scores ? {
+    ...judge.scores,
+    ...(judge.reference_match_notes ? { reference_match_notes: judge.reference_match_notes } : {}),
+    ...(judge.what_worked ? { what_worked: judge.what_worked } : {}),
+  } : null
   db.prepare(`UPDATE videos SET
     video_judge_overall = ?, video_judge_scores = ?, video_judge_issues = ?, video_judge_verdict = ?
     WHERE video_id = ?`).run(
     judge.overall ?? null,
-    judge.scores ? JSON.stringify(judge.scores) : null,
+    scoresWithExtras ? JSON.stringify(scoresWithExtras) : null,
     judge.top_issues ? JSON.stringify(judge.top_issues) : null,
     judge.verdict ?? null,
     videoId,
@@ -351,11 +411,227 @@ export function saveProduct(productId, region, productInfo) {
   }
 }
 
-export function getProductCache(productId, maxAgeMs = 24 * 3600 * 1000) {
-  const row = db.prepare('SELECT product_info, last_used_at FROM products WHERE product_id = ?').get(productId)
+// 把一个 url 数组按 colorFilter 过滤，保留 colors 中匹配的索引位置（case-insensitive）
+function filterUrlsByColor(urls, colors, colorFilter) {
+  if (!colorFilter) return urls
+  const target = String(colorFilter).trim().toLowerCase()
+  const result = []
+  for (let i = 0; i < urls.length; i++) {
+    const c = (colors[i] || '').trim().toLowerCase()
+    if (c === target) result.push(urls[i])
+  }
+  return result
+}
+
+// 把 urls 数组和 colors 数组对齐（如果 colors 比 urls 短，用空串补齐；长则截断）
+function alignColors(urls, colors) {
+  const out = new Array(urls.length).fill('')
+  if (!Array.isArray(colors)) return out
+  for (let i = 0; i < urls.length && i < colors.length; i++) {
+    out[i] = String(colors[i] || '')
+  }
+  return out
+}
+
+export function getProductCache(productId, maxAgeMs = 24 * 3600 * 1000, colorFilter = null) {
+  const row = db.prepare(`
+    SELECT product_info, last_used_at, main_image_urls, detail_image_urls, user_image_urls,
+           main_image_colors, detail_image_colors, user_image_colors, is_curated
+    FROM products WHERE product_id = ?
+  `).get(productId)
   if (!row) return null
-  if (Date.now() - row.last_used_at > maxAgeMs) return null  // 过期
-  return JSON.parse(row.product_info)
+  // curated 产品（用户已加图）不再过期；其他走 24h 检查
+  if (!row.is_curated && Date.now() - row.last_used_at > maxAgeMs) return null
+  const productInfo = JSON.parse(row.product_info)
+  const mainUrls = row.main_image_urls ? JSON.parse(row.main_image_urls) : []
+  const detailUrls = row.detail_image_urls ? JSON.parse(row.detail_image_urls) : []
+  const userUrls = row.user_image_urls ? JSON.parse(row.user_image_urls) : []
+  const mainColors = alignColors(mainUrls, row.main_image_colors ? JSON.parse(row.main_image_colors) : [])
+  const detailColors = alignColors(detailUrls, row.detail_image_colors ? JSON.parse(row.detail_image_colors) : [])
+  const userColors = alignColors(userUrls, row.user_image_colors ? JSON.parse(row.user_image_colors) : [])
+
+  // colorFilter 模式：覆盖 productInfo 里的 url 数组，只留匹配色的图（user 图并入 detail 池）
+  if (colorFilter) {
+    productInfo.mainImageUrls = filterUrlsByColor(mainUrls, mainColors, colorFilter)
+    const filteredDetail = filterUrlsByColor(detailUrls, detailColors, colorFilter)
+    const filteredUser = filterUrlsByColor(userUrls, userColors, colorFilter)
+    productInfo.detailImageUrls = [...filteredDetail, ...filteredUser]
+  } else {
+    // 不过滤：保留 productInfo 自身的 url 数组（与原行为一致），把用户图合并进 detail
+    if (userUrls.length > 0) {
+      productInfo.detailImageUrls = [...(productInfo.detailImageUrls || []), ...userUrls]
+    }
+  }
+  return productInfo
+}
+
+// 把 colors 数组算成 {color: count, '': untaggedCount}
+function summarizeColors(...colorArrays) {
+  const counts = {}
+  for (const arr of colorArrays) {
+    for (const c of (arr || [])) {
+      const key = (c || '').trim()
+      counts[key] = (counts[key] || 0) + 1
+    }
+  }
+  return counts
+}
+
+// 列出所有缓存产品（管理页用）。按 last_used_at DESC 排
+export function listProducts({ limit = 200, offset = 0 } = {}) {
+  const rows = db.prepare(`
+    SELECT product_id, name, region, main_image_urls, detail_image_urls, user_image_urls,
+           main_image_colors, detail_image_colors, user_image_colors,
+           is_curated, job_count, first_seen_at, last_used_at
+    FROM products
+    ORDER BY last_used_at DESC
+    LIMIT ? OFFSET ?
+  `).all(limit, offset)
+  return rows.map(r => {
+    const main = r.main_image_urls ? JSON.parse(r.main_image_urls) : []
+    const detail = r.detail_image_urls ? JSON.parse(r.detail_image_urls) : []
+    const user = r.user_image_urls ? JSON.parse(r.user_image_urls) : []
+    const mainColors = alignColors(main, r.main_image_colors ? JSON.parse(r.main_image_colors) : [])
+    const detailColors = alignColors(detail, r.detail_image_colors ? JSON.parse(r.detail_image_colors) : [])
+    const userColors = alignColors(user, r.user_image_colors ? JSON.parse(r.user_image_colors) : [])
+    return {
+      productId: r.product_id,
+      name: r.name,
+      region: r.region,
+      coverImageUrl: main[0] || detail[0] || user[0] || null,  // 列表卡片用
+      mainImageCount: main.length,
+      detailImageCount: detail.length,
+      userImageCount: user.length,
+      colorCounts: summarizeColors(mainColors, detailColors, userColors),
+      isCurated: !!r.is_curated,
+      jobCount: r.job_count,
+      firstSeenAt: r.first_seen_at,
+      lastUsedAt: r.last_used_at,
+    }
+  })
+}
+
+// 取单个产品的完整信息（管理页详情用，user_image_urls 单独返回不合并）
+export function getProductFull(productId) {
+  const row = db.prepare(`
+    SELECT product_id, name, region, product_info, main_image_urls, detail_image_urls,
+           user_image_urls, main_image_colors, detail_image_colors, user_image_colors,
+           is_curated, job_count, first_seen_at, last_used_at
+    FROM products WHERE product_id = ?
+  `).get(productId)
+  if (!row) return null
+  const mainUrls = row.main_image_urls ? JSON.parse(row.main_image_urls) : []
+  const detailUrls = row.detail_image_urls ? JSON.parse(row.detail_image_urls) : []
+  const userUrls = row.user_image_urls ? JSON.parse(row.user_image_urls) : []
+  return {
+    productId: row.product_id,
+    name: row.name,
+    region: row.region,
+    productInfo: row.product_info ? JSON.parse(row.product_info) : null,
+    mainImageUrls: mainUrls,
+    detailImageUrls: detailUrls,
+    userImageUrls: userUrls,
+    mainImageColors: alignColors(mainUrls, row.main_image_colors ? JSON.parse(row.main_image_colors) : []),
+    detailImageColors: alignColors(detailUrls, row.detail_image_colors ? JSON.parse(row.detail_image_colors) : []),
+    userImageColors: alignColors(userUrls, row.user_image_colors ? JSON.parse(row.user_image_colors) : []),
+    isCurated: !!row.is_curated,
+    jobCount: row.job_count,
+    firstSeenAt: row.first_seen_at,
+    lastUsedAt: row.last_used_at,
+  }
+}
+
+// 整体覆写 user_image_urls + user_image_colors（保持对齐），自动 is_curated=1
+export function updateProductImages(productId, userImageUrls, userImageColors = null) {
+  const urls = userImageUrls || []
+  const colors = alignColors(urls, userImageColors || [])
+  const result = db.prepare(`
+    UPDATE products SET
+      user_image_urls = ?, user_image_colors = ?, is_curated = 1, last_used_at = ?
+    WHERE product_id = ?
+  `).run(JSON.stringify(urls), JSON.stringify(colors), Date.now(), productId)
+  return result.changes > 0
+}
+
+// 找单张图所在的 (section, index)，section ∈ {'main','detail','user'}
+// 返回 null 表示没找到
+function findImageLocation(productId, url) {
+  const row = db.prepare(
+    'SELECT main_image_urls, detail_image_urls, user_image_urls FROM products WHERE product_id = ?'
+  ).get(productId)
+  if (!row) return null
+  const sections = [
+    { name: 'main', urls: row.main_image_urls ? JSON.parse(row.main_image_urls) : [] },
+    { name: 'detail', urls: row.detail_image_urls ? JSON.parse(row.detail_image_urls) : [] },
+    { name: 'user', urls: row.user_image_urls ? JSON.parse(row.user_image_urls) : [] },
+  ]
+  for (const s of sections) {
+    const idx = s.urls.indexOf(url)
+    if (idx >= 0) return { section: s.name, index: idx, urls: s.urls }
+  }
+  return null
+}
+
+// 设置某张图的颜色（自动定位在 main/detail/user 哪个数组）。返回是否成功
+export function setImageColor(productId, url, color) {
+  const loc = findImageLocation(productId, url)
+  if (!loc) return false
+  const colorCol = `${loc.section}_image_colors`
+  const row = db.prepare(`SELECT ${colorCol} as c FROM products WHERE product_id = ?`).get(productId)
+  const colors = alignColors(loc.urls, row.c ? JSON.parse(row.c) : [])
+  colors[loc.index] = String(color || '').trim()
+  db.prepare(`UPDATE products SET ${colorCol} = ?, last_used_at = ? WHERE product_id = ?`)
+    .run(JSON.stringify(colors), Date.now(), productId)
+  return true
+}
+
+// 批量打标：把所有传入 url 的颜色都设成同一个值。返回成功数
+export function bulkSetImageColors(productId, urls, color) {
+  let success = 0
+  for (const url of urls || []) {
+    if (setImageColor(productId, url, color)) success++
+  }
+  return success
+}
+
+export function renameProduct(productId, newName) {
+  const result = db.prepare('UPDATE products SET name = ? WHERE product_id = ?').run(newName, productId)
+  return result.changes > 0
+}
+
+// 更新某条视频的 video_url（migration / S3 替换 kie URL 用）
+export function updateVideoUrl(videoId, newUrl) {
+  const result = db.prepare('UPDATE videos SET video_url = ? WHERE video_id = ?').run(newUrl, videoId)
+  return result.changes > 0
+}
+
+// 标记某条视频已发布到 TikTok。tiktokVideoId 可为空（仅标记 is_published）
+export function markVideoPublished(videoId, tiktokVideoId, isPublished = true) {
+  const result = db.prepare(`UPDATE videos SET
+    is_published = ?, tiktok_video_id = ?
+    WHERE video_id = ?
+  `).run(isPublished ? 1 : 0, tiktokVideoId || null, videoId)
+  return result.changes > 0
+}
+
+// 从产品的 product_info JSON 拿到 SKU 选项词表（用于约束 AI 打标）
+// 默认取 variants 第一轴（一般是 Color）。返回 { axis, values }，没有 variants 时 values=[]
+export function getProductSkuOptions(productId) {
+  const row = db.prepare('SELECT product_info FROM products WHERE product_id = ?').get(productId)
+  if (!row || !row.product_info) return { axis: null, values: [] }
+  try {
+    const info = JSON.parse(row.product_info)
+    const first = (info.variants || [])[0]
+    if (!first || !Array.isArray(first.values)) return { axis: null, values: [] }
+    return { axis: first.name || null, values: first.values.filter(v => v && typeof v === 'string') }
+  } catch {
+    return { axis: null, values: [] }
+  }
+}
+
+export function deleteProduct(productId) {
+  const result = db.prepare('DELETE FROM products WHERE product_id = ?').run(productId)
+  return result.changes > 0
 }
 
 // ===== Reference Video（标杆参考视频库）操作 =====

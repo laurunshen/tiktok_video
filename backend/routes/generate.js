@@ -9,9 +9,10 @@ import axios from 'axios'
 import { analyzeAndGeneratePrompt, SEEDANCE_MANDATORY_BLOCKS, VARIANT_RECIPES } from '../services/gemini.js'
 import { validateGeminiOutput, formatValidationReport } from '../services/prompt-validator.js'
 import { reviewPrompt, reviseGeminiOutput, formatReviewReport, clearImageCache } from '../services/gemini-review.js'
-import { saveJob, getJob, listJobs, countJobs, saveVideo, updateVideoJudge, updateVideoDiffJudge } from '../services/db.js'
+import { saveJob, getJob, listJobs, countJobs, saveVideo, updateVideoJudge, updateVideoDiffJudge, updateVideoUrl, getVideosByJob, markVideoPublished } from '../services/db.js'
+import { S3_ENABLED, uploadUrlToS3, uploadVideoAndPosterFromUrl } from '../services/s3-upload.js'
 import { judgeGeneratedVideo, judgeNarrativeDifferentiation } from '../services/gemini-video-judge.js'
-import { uploadImagesToKie, uploadFileToKie } from '../services/kieai-upload.js'
+import { uploadMediaFiles, uploadMediaFile } from '../services/media-upload.js'
 import { createBatchTasks, getTaskStatus, parseTaskResult } from '../services/kieai.js'
 import { getTikTokPlaybackUrl } from '../services/snaptik.js'
 
@@ -172,9 +173,15 @@ router.post('/', upload.fields([
     const batchCount = parseInt(req.body.batchCount) || 1
     const resolution = req.body.resolution || '480p'
     const duration = parseInt(req.body.duration) || 15
+    const skipReferenceVideo = req.body.skipReferenceVideo === '1'  // A/B 测试用：跳过 Seedance reference_video（Gemini 仍照常分析）
     // variantSeed: 1-5 选不同的模特+场景配方，用于同一标杆视频的裂变（避免 TikTok 查重）
-    // null = 不指定 variant（兼容旧调用）
-    const variantSeed = req.body.variantSeed ? parseInt(req.body.variantSeed) : null
+    // 关键：variantSeed 也是人脸防泄漏的开关——空值会让 presenter 描述太泛，
+    // Seedance 直接抄参考视频的脸。所以 null 时自动随机选 1-5，永远不让 generic 配方上场。
+    const reqSeed = req.body.variantSeed ? parseInt(req.body.variantSeed) : null
+    const variantSeed = (reqSeed && reqSeed >= 1 && reqSeed <= 5)
+      ? reqSeed
+      : (1 + Math.floor(Math.random() * 5))
+    if (!reqSeed) console.log(`[generate] variantSeed 未指定，自动随机选 ${variantSeed}`)
 
     // 产品图：用户上传 + 商品链接抓取的图片合并（不再二选一），由 Gemini 从合集中筛选最好的
     const scrapedImageUrls = productInfo
@@ -240,16 +247,19 @@ router.post('/', upload.fields([
           throw new Error('Snaptik 解析失败，请检查 TikTok 链接或改为直接上传视频文件')
         }
         console.log(`[${jobId}] Snaptik 解析成功: ${resolvedVideoUrl}`)
+        // 把直链存到 job 上，供后续 diff_judge 使用（Gemini 下不动 TikTok 原链）
+        job.resolvedReferenceVideoUrl = resolvedVideoUrl
+        saveJob(job)
       }
 
-      // Step 0b: 上传产品图到 kie.ai（只有用户手动上传了图片才需要）
+      // Step 0b: 上传产品图到 S3（只有用户手动上传了图片才需要；URL 持久不过期）
       let kieImageResults = []
       if (productImageFiles.length > 0) {
-        setStep(0, `上传产品图到 kie.ai（共 ${productImageFiles.length} 张）`)
-        kieImageResults = await uploadImagesToKie(productImageFiles)
+        setStep(0, `上传产品图到 S3（共 ${productImageFiles.length} 张）`)
+        kieImageResults = await uploadMediaFiles(productImageFiles)
         console.log(`[${jobId}] 上传完成`)
       } else {
-        console.log(`[${jobId}] 使用商品链接图片，跳过 kie.ai 上传`)
+        console.log(`[${jobId}] 使用商品链接图片，跳过上传`)
       }
 
       setStep(1, 'Gemini 分析参考视频 + 筛选图片 + 生成提示词')
@@ -272,13 +282,13 @@ router.post('/', upload.fields([
       // Step 2a: 选中的远程图（来自商品链接）补传到 kie.ai 拿公网 URL
       const remoteToUpload = (geminiResult.selected_images || []).filter(s => s.source === 'remote' && s.sourceUrl)
       if (remoteToUpload.length > 0) {
-        setStep(2, `上传选中的 ${remoteToUpload.length} 张商品链接图到 kie.ai`)
+        setStep(2, `上传选中的 ${remoteToUpload.length} 张商品链接图到 S3`)
         for (const item of remoteToUpload) {
           try {
             const tmpPath = path.join(os.tmpdir(), `${uuidv4()}.jpg`)
             const dl = await axios.get(item.sourceUrl, { responseType: 'arraybuffer', timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0' } })
             await writeFile(tmpPath, dl.data)
-            const uploadedUrl = await uploadFileToKie(tmpPath, 'product.jpg')
+            const uploadedUrl = await uploadMediaFile(tmpPath, 'product.jpg')
             item.publicUrl = uploadedUrl
             await unlink(tmpPath).catch(() => {})
           } catch (e) {
@@ -295,7 +305,9 @@ router.post('/', upload.fields([
 
       // Step 2b: ffmpeg 截取关键片段并上传到 kie.ai 作为 Seedance reference_video
       let referenceVideoUrls = []
-      try {
+      if (skipReferenceVideo) {
+        console.log(`[${jobId}] skipReferenceVideo=1，跳过 Seedance reference_video 上传（A/B 测试模式）`)
+      } else try {
         const segStart = Math.max(0, parseInt(geminiResult.key_segment_start_seconds) || 0)
         let segEnd = parseInt(geminiResult.key_segment_end_seconds)
         if (!segEnd || segEnd <= segStart) segEnd = segStart + 14
@@ -312,10 +324,10 @@ router.post('/', upload.fields([
         })() : null)
 
         if (srcVideoPath) {
-          setStep(2, `截取参考视频片段 [${segStart}s-${segEnd}s] 并上传到 kie.ai`)
+          setStep(2, `截取参考视频片段 [${segStart}s-${segEnd}s] 并上传到 S3`)
           const clipPath = path.join(os.tmpdir(), `${uuidv4()}-clip.mp4`)
           await ffmpegClip(srcVideoPath, segStart, segEnd, clipPath)
-          const clipUrl = await uploadFileToKie(clipPath, 'reference-clip.mp4')
+          const clipUrl = await uploadMediaFile(clipPath, 'reference-clip.mp4')
           referenceVideoUrls = [clipUrl]
           await unlink(clipPath).catch(() => {})
           console.log(`[${jobId}] 参考视频片段已上传: ${clipUrl}`)
@@ -432,13 +444,18 @@ router.post('/', upload.fields([
       const featuresSummary = features.silhouette || features.color || features.edge_finish ? `[PRODUCT REMINDER — repeat of the visual anchor at top, do NOT ignore]
 The bra in the video has: ${features.silhouette || ''}${features.structure ? ', ' + features.structure : ''}${features.edge_finish ? ', ' + features.edge_finish : ''}${features.fabric_visual ? ', ' + features.fabric_visual : ''}${features.color ? ', color: ' + features.color : ''}.${features.distinguishing_details ? ' Distinguishing: ' + features.distinguishing_details + '.' : ''}` : ''
 
-      const allBlocks = [SEEDANCE_MANDATORY_BLOCKS, colorLockBlock, featuresSummary].filter(Boolean).join('\n\n')
+      // 物理约束末尾锚点：把 CHARACTER / ANATOMICAL / ACTION SAFETY / COLOR 在 prompt 最末尾用一句话再说一次，
+      // 形成首尾呼应。视频模型对长 prompt 的末尾几句通常给予更高 attention 权重。
+      const physicalAnchorBlock = `[PHYSICAL ANCHOR — final reminder of the non-negotiable physical rules]
+ONE PERSON across the entire video — same face, hair, makeup, body in every frame. Hands have exactly 5 fingers in natural positions; if a hand cannot render cleanly, keep it out of frame. SURFACE-ONLY contact with the product (no fingers slipping under fabric, no pulling/pinching thin straps). Bra is ${dominantColor || 'the single dominant color'} in EVERY frame. NO mirror-flip transitions.`
+
+      const allBlocks = [SEEDANCE_MANDATORY_BLOCKS, colorLockBlock, featuresSummary, physicalAnchorBlock].filter(Boolean).join('\n\n')
       const lastDashIdx = rawPrompt.lastIndexOf('\n---')
       const finalPrompt = lastDashIdx > -1
         ? rawPrompt.slice(0, lastDashIdx) + '\n\n' + allBlocks + '\n' + rawPrompt.slice(lastDashIdx)
         : rawPrompt + '\n\n' + allBlocks
       geminiResult.seedance_prompt = finalPrompt
-      const blockCount = 7 + (dominantColor ? 1 : 0) + (featuresSummary ? 1 : 0)  // 7 mandatory + 可选 COLOR LOCK + 可选 PRODUCT REMINDER
+      const blockCount = 8 + (dominantColor ? 1 : 0) + (featuresSummary ? 1 : 0) + 1  // 8 mandatory + 可选 COLOR LOCK + 可选 PRODUCT REMINDER + PHYSICAL ANCHOR
       console.log(`[${jobId}] 已注入 ${blockCount} 个块${dominantColor ? `（含 COLOR LOCK = ${dominantColor}）` : ''}，prompt 总长 ${finalPrompt.length} 字符`)
 
       setStep(2, `创建 ${batchCount} 个 Seedance 生成任务`)
@@ -523,9 +540,27 @@ router.get('/status/:jobId', async (req, res) => {
       })
     )
 
-    const videos = taskStatuses
-      .filter(t => t.state === 'success' && t.videoUrl)
-      .map(t => ({ taskId: t.taskId, videoUrl: t.videoUrl }))
+    const successTasks = taskStatuses.filter(t => t.state === 'success' && t.videoUrl)
+
+    // S3 自动持久化：把 kie tempfile URL 上传到我们自己的 S3，替换 videoUrl
+    // 同时生成首帧 poster JPG（历史页缩略图用，省 100× 流量）
+    // 失败不阻塞，会保留原 kie URL；poster 失败 posterUrl=null（前端 fallback 到 video tag）
+    if (S3_ENABLED) {
+      for (const t of successTasks) {
+        if (t.videoUrl && !t.videoUrl.includes('hypit.s3.')) {
+          try {
+            const { videoUrl, posterUrl } = await uploadVideoAndPosterFromUrl(t.videoUrl, t.taskId)
+            console.log(`[${jobId}] ☁️ S3 上传成功 ${t.taskId}: ${videoUrl}${posterUrl ? ' + poster' : ''}`)
+            t.videoUrl = videoUrl
+            t.posterUrl = posterUrl
+          } catch (e) {
+            console.warn(`[${jobId}] ☁️ S3 上传失败（保留 kie URL）${t.taskId}: ${e.message}`)
+          }
+        }
+      }
+    }
+
+    const videos = successTasks.map(t => ({ taskId: t.taskId, videoUrl: t.videoUrl, posterUrl: t.posterUrl ?? null }))
 
     job.videos = videos
 
@@ -546,6 +581,7 @@ router.get('/status/:jobId', async (req, res) => {
               videoId: v.taskId,
               jobId: job.jobId,
               videoUrl: v.videoUrl,
+              posterUrl: v.posterUrl,
               prompt: job.geminiResult?.seedance_prompt,
               compressedScript: job.geminiResult?.compressed_script,
               productVisualFeatures: job.geminiResult?.product_visual_features,
@@ -571,21 +607,21 @@ router.get('/status/:jobId', async (req, res) => {
                 generatedVideoUrl: v.videoUrl,
                 productInfo: job.geminiResult?.product_visual_features,
                 prompt: job.geminiResult?.seedance_prompt,
+                referenceImageUrls: job.geminiResult?.selected_image_urls || [],
               })
               if (judge) {
                 updateVideoJudge(v.taskId, judge)
                 console.log(`[${jobId}] ✅ 视频评分完成：${judge.overall}/10 — ${judge.verdict}`)
               }
               // 如果有标杆参考视频，再做差异化评分
-              if (job.referenceVideoUrl) {
-                console.log(`[${jobId}] 🔍 与标杆视频对比差异化...`)
-                // 转换 TikTok URL → 直链：从 backend 直接拿不到，传 raw URL 给 Gemini 也能下载
-                // 但 Gemini 对 TikTok URL 的 inline 不可访问，所以这里跳过：未来如果需要可加 snaptik 解析
-                // 暂时只对比 video URL，如果是 TikTok URL 会失败但不阻塞
+              // 优先用 snaptik 解析后的直链（Gemini 下不动 TikTok 原链），否则 fallback 到 raw URL
+              const benchmarkUrl = job.resolvedReferenceVideoUrl || job.referenceVideoUrl
+              if (benchmarkUrl) {
+                console.log(`[${jobId}] 🔍 与标杆视频对比差异化（用 ${job.resolvedReferenceVideoUrl ? 'snaptik 直链' : 'raw URL'}）...`)
                 try {
                   const diff = await judgeNarrativeDifferentiation({
                     generatedVideoUrl: v.videoUrl,
-                    benchmarkVideoUrl: job.referenceVideoUrl,
+                    benchmarkVideoUrl: benchmarkUrl,
                   })
                   if (diff) {
                     updateVideoDiffJudge(v.taskId, diff)
@@ -643,14 +679,97 @@ router.get('/variants', (req, res) => {
 })
 
 // GET /api/generate/jobs?limit=50&offset=0&status=completed - 历史任务列表
+// 每条 job 附带：videos 简要（taskId / video_url / 评分）便于历史页直接展示
 router.get('/jobs', (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 50, 200)
   const offset = parseInt(req.query.offset) || 0
-  const status = req.query.status || null
+  const rawStatus = req.query.status || null
+  const published = rawStatus === 'published'
+  // 未发布 = 已完成且没有任何已发布 video（自动隐含 status=completed）
+  const unpublished = rawStatus === 'unpublished'
+  const status = (published || unpublished) ? (unpublished ? 'completed' : null) : rawStatus
+  const sortBy = req.query.sortBy === 'quality' ? 'quality' : 'time'
   try {
-    const jobs = listJobs({ limit, offset, status })
-    const total = countJobs(status)
-    res.json({ total, limit, offset, jobs })
+    const jobs = listJobs({ limit, offset, status, sortBy, published, unpublished })
+    const total = countJobs(status, published, unpublished)
+    // 补 videos 摘要
+    const enriched = jobs.map(j => {
+      const vids = getVideosByJob(j.job_id) || []
+      return {
+        ...j,
+        videos: vids.map(v => ({
+          videoId: v.video_id,
+          videoUrl: v.video_url,
+          posterUrl: v.poster_url,
+          videoJudgeOverall: v.video_judge_overall,
+          diffJudgeOverall: v.diff_judge_overall,
+          reviewScore: v.review_score,
+          isPublished: !!v.is_published,
+          tiktokVideoId: v.tiktok_video_id,
+        })),
+      }
+    })
+    res.json({ total, limit, offset, jobs: enriched })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// PATCH /api/generate/videos/:videoId/published — 标记某条视频已发布到 TikTok
+// body: { tiktokInput: <URL 或 纯 video_id> | null, isPublished?: boolean }
+// 若传 tiktokInput，自动从 URL 提取数字 id；若 isPublished 缺省则按是否有 input 决定
+router.patch('/videos/:videoId/published', express.json(), (req, res) => {
+  const { videoId } = req.params
+  const { tiktokInput, isPublished } = req.body
+  let tiktokVideoId = null
+  if (tiktokInput && typeof tiktokInput === 'string') {
+    const trimmed = tiktokInput.trim()
+    // 纯数字
+    if (/^\d+$/.test(trimmed)) {
+      tiktokVideoId = trimmed
+    } else {
+      // URL 形式：/video/123... 或 /v/123...
+      const m = trimmed.match(/\/(?:video|v)\/(\d+)/)
+      if (m) tiktokVideoId = m[1]
+      else return res.status(400).json({ error: '无法从输入中提取 TikTok video id（请贴 URL 或纯数字 id）' })
+    }
+  }
+  const flag = isPublished == null ? (tiktokVideoId != null) : !!isPublished
+  const ok = markVideoPublished(videoId, tiktokVideoId, flag)
+  if (!ok) return res.status(404).json({ error: 'Video not found' })
+  res.json({ ok: true, videoId, tiktokVideoId, isPublished: flag })
+})
+
+// GET /api/generate/jobs/:jobId - 单条 job 完整详情（含 videos + prompt + 全评分）
+router.get('/jobs/:jobId', (req, res) => {
+  try {
+    const job = getJob(req.params.jobId)
+    if (!job) return res.status(404).json({ error: 'Job not found' })
+    const videos = getVideosByJob(req.params.jobId) || []
+    res.json({
+      job,
+      videos: videos.map(v => ({
+        videoId: v.video_id,
+        videoUrl: v.video_url,
+        posterUrl: v.poster_url,
+        prompt: v.prompt,
+        compressedScript: v.compressed_script,
+        reviewScore: v.review_score,
+        reviewPass: v.review_pass,
+        reviewIssues: v.review_issues ? JSON.parse(v.review_issues) : null,
+        revisionCount: v.revision_count,
+        videoJudgeOverall: v.video_judge_overall,
+        videoJudgeScores: v.video_judge_scores ? JSON.parse(v.video_judge_scores) : null,
+        videoJudgeIssues: v.video_judge_issues ? JSON.parse(v.video_judge_issues) : null,
+        videoJudgeVerdict: v.video_judge_verdict,
+        diffJudgeOverall: v.diff_judge_overall,
+        diffJudgeScores: v.diff_judge_scores ? JSON.parse(v.diff_judge_scores) : null,
+        diffJudgeVerdict: v.diff_judge_verdict,
+        isPublished: !!v.is_published,
+        tiktokVideoId: v.tiktok_video_id,
+        createdAt: v.created_at,
+      })),
+    })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

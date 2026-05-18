@@ -1,4 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import ProductManager from './ProductManager.jsx'
+import HistoryView from './HistoryView.jsx'
 
 const API = '/api'
 
@@ -43,6 +45,26 @@ const s = {
   video: { width: '100%', borderRadius: 8, maxHeight: 420, display: 'block' },
   err: { background: '#fff1f2', border: '1px solid #fecdd3', borderRadius: 9, padding: 14, color: '#be123c', fontSize: 14, marginBottom: 16 },
   copyBtn: { padding: '5px 12px', borderRadius: 6, border: '1px solid #ddd', background: '#fff', cursor: 'pointer', fontSize: 12, color: '#555', marginTop: 8 },
+  prodPick: {
+    display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10,
+  },
+  prodCard: (active) => ({
+    border: `2px solid ${active ? '#6366f1' : '#eee'}`,
+    borderRadius: 10, padding: 8, cursor: 'pointer',
+    background: active ? '#eef2ff' : '#fff',
+    transition: 'all 0.15s', position: 'relative',
+  }),
+  prodCardCover: { width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 6, background: '#f5f5f5', display: 'block' },
+  prodCardName: { fontSize: 12, fontWeight: 600, color: '#111', marginTop: 6, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' },
+  prodCardMeta: { fontSize: 10, color: '#888', marginTop: 4 },
+  tabBar: { display: 'flex', gap: 4, marginBottom: 24, borderBottom: '1px solid #e5e5e5' },
+  tabBtn: (active) => ({
+    padding: '10px 18px', border: 'none', background: 'none', cursor: 'pointer',
+    fontSize: 14, fontWeight: active ? 600 : 500,
+    color: active ? '#6366f1' : '#666',
+    borderBottom: `2px solid ${active ? '#6366f1' : 'transparent'}`,
+    marginBottom: -1, transition: 'all 0.15s',
+  }),
 }
 
 function DropZone({ label, accept, multiple, onFiles, files, type }) {
@@ -78,6 +100,13 @@ const CATEGORIES = [
 const REGIONS = ['SG', 'US', 'GB', 'MY', 'TH', 'PH', 'VN', 'ID', 'AU']
 
 export default function App() {
+  const [tab, setTab] = useState('generate')  // 'generate' | 'products'
+  const [cachedProducts, setCachedProducts] = useState([])
+  // 选中缓存产品后的颜色过滤
+  const [productSkuColor, setProductSkuColor] = useState('')  // '' = 不过滤；其他 = 只用该颜色的图
+  const [productColorInventory, setProductColorInventory] = useState(null)  // { color: count } 来自后端 getProductFull
+  const [productAllImages, setProductAllImages] = useState(null)  // { main:[{url,color}], detail:[...], user:[...] } 全量原始
+  const [productSkuRecommendation, setProductSkuRecommendation] = useState(null)  // { recommended, reason } AI 推荐
   const [refVideo, setRefVideo] = useState([])
   const [tiktokVideoUrl, setTiktokVideoUrl] = useState('')
   const [images, setImages] = useState([])
@@ -100,12 +129,16 @@ export default function App() {
   // VARIANT: 同一标杆视频的裂变配方（不同模特+场景），null=不指定
   const [variantSeed, setVariantSeed] = useState(null)
   const [variants, setVariants] = useState([])
+  const [skipReferenceVideo, setSkipReferenceVideo] = useState(false)  // A/B 测试：跳过 Seedance reference_video
   const [jobId, setJobId] = useState(null)
   const [jobStatus, setJobStatus] = useState(null)
   const [loading, setLoading] = useState(false)
   const [currentStep, setCurrentStep] = useState(-1)
   const [error, setError] = useState(null)
   const [waitSec, setWaitSec] = useState(0)
+  const [subStepStart, setSubStepStart] = useState(null)  // 当前 stepLabel 开始的时间戳
+  const [subStepLabel, setSubStepLabel] = useState('')  // 上次记录的 stepLabel
+  const [now, setNow] = useState(Date.now())
   const [copied, setCopied] = useState(false)
   const pollRef = useRef(null)
   const timerRef = useRef(null)
@@ -127,6 +160,114 @@ export default function App() {
       .then(d => setVariants(d.variants || []))
       .catch(() => {})
   }, [])
+
+  // stepLabel 变化时重置 subStep 计时
+  useEffect(() => {
+    const lbl = jobStatus?.stepLabel || ''
+    if (lbl !== subStepLabel) {
+      setSubStepLabel(lbl)
+      setSubStepStart(Date.now())
+    }
+  }, [jobStatus?.stepLabel, subStepLabel])
+
+  // 1s tick — 让 elapsed 显示是活的
+  useEffect(() => {
+    if (!loading) return
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [loading])
+
+  // 切到生成页时刷新缓存产品列表（用于下拉选择器）
+  useEffect(() => {
+    if (tab !== 'generate') return
+    fetch(`${API}/product/list`)
+      .then(r => r.json())
+      .then(d => setCachedProducts(d.items || []))
+      .catch(() => {})
+  }, [tab])
+
+  // 选缓存产品 → 自动填充 productInfo，跳过爬虫
+  const selectCachedProduct = async (productId) => {
+    if (!productId) {
+      setProductColorInventory(null); setProductAllImages(null); setProductSkuColor(''); setProductSkuRecommendation(null)
+      return
+    }
+    setProductSkuRecommendation(null)
+    setFetchingProduct(true)
+    setProductError(null)
+    try {
+      const r = await fetch(`${API}/product/cache/${productId}`)
+      const data = await r.json()
+      if (!r.ok) throw new Error(data.error || '加载缓存失败')
+      const p = data.product
+      // 全量原始数据（含颜色对齐数组），后续按颜色过滤
+      const rawImages = {
+        main: (p.mainImageUrls || []).map((u, i) => ({ url: u, color: (p.mainImageColors || [])[i] || '' })),
+        detail: (p.detailImageUrls || []).map((u, i) => ({ url: u, color: (p.detailImageColors || [])[i] || '' })),
+        user: (p.userImageUrls || []).map((u, i) => ({ url: u, color: (p.userImageColors || [])[i] || '' })),
+      }
+      // 颜色清单（排除未标）
+      const inv = {}
+      for (const arr of [rawImages.main, rawImages.detail, rawImages.user]) {
+        for (const { color } of arr) {
+          const k = (color || '').trim()
+          if (k) inv[k] = (inv[k] || 0) + 1
+        }
+      }
+      setProductAllImages(rawImages)
+      setProductColorInventory(inv)
+      setProductSkuColor('')  // 默认不过滤
+      // 默认 productInfo = 全图（用户图并入 detail，与后端一致）
+      const productInfo = {
+        ...p.productInfo,
+        productId: p.productId,
+        mainImageUrls: p.mainImageUrls,
+        detailImageUrls: [...p.detailImageUrls, ...p.userImageUrls],
+      }
+      setProductInfo(productInfo)
+      setProductId(p.productId)
+      setProductUrl(p.productId)
+      setProductRegion(p.region || 'SG')
+      // 预取标杆视频
+      setBenchmarkVideos([])
+      setShowBenchmarks(false)
+      try {
+        const bm = await fetch(`${API}/product/benchmark-videos?productId=${p.productId}&limit=10`)
+        if (bm.ok) {
+          const bmd = await bm.json()
+          if (bmd.videos?.length > 0) setBenchmarkVideos(bmd.videos)
+        }
+      } catch {}
+    } catch (e) {
+      setProductError(e.message)
+    } finally {
+      setFetchingProduct(false)
+    }
+  }
+
+  // 颜色过滤变化 → 重算 productInfo 里的 url 数组
+  useEffect(() => {
+    if (!productAllImages || !productInfo) return
+    const norm = (c) => (c || '').trim().toLowerCase()
+    const target = norm(productSkuColor)
+    if (!target) {
+      // 不过滤：用全图
+      setProductInfo(pi => ({
+        ...pi,
+        mainImageUrls: productAllImages.main.map(x => x.url),
+        detailImageUrls: [...productAllImages.detail.map(x => x.url), ...productAllImages.user.map(x => x.url)],
+      }))
+    } else {
+      const filterFn = (arr) => arr.filter(x => norm(x.color) === target).map(x => x.url)
+      setProductInfo(pi => ({
+        ...pi,
+        mainImageUrls: filterFn(productAllImages.main),
+        detailImageUrls: [...filterFn(productAllImages.detail), ...filterFn(productAllImages.user)],
+      }))
+    }
+  // 只有当 sku color 或基础图集变化时才重算
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productSkuColor, productAllImages])
 
   const stopTimers = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
@@ -208,7 +349,7 @@ export default function App() {
       return
     }
     if (!hasProductImages) {
-      setError('请提供产品图（上传图片或抓取商品链接）')
+      setError('请先在「选择产品」里选一个产品（没产品的话去 📦 产品管理 tab 抓取）')
       return
     }
     setError(null); setLoading(true); setJobStatus(null); setCurrentStep(0)
@@ -222,6 +363,7 @@ export default function App() {
     fd.append('isSameProduct', isSameProduct ? '1' : '0')
     fd.append('batchCount', batchCount)
     if (variantSeed) fd.append('variantSeed', variantSeed)
+    if (skipReferenceVideo) fd.append('skipReferenceVideo', '1')
     fd.append('resolution', resolution)
     fd.append('duration', duration)
     try {
@@ -269,6 +411,7 @@ export default function App() {
     setRefVideo([]); setImages([]); setDescription('')
     setTiktokVideoUrl('')
     setProductUrl(''); setProductInfo(null); setProductId(null); setProductError(null); setIsSameProduct(true)
+    setProductSkuColor(''); setProductColorInventory(null); setProductAllImages(null)
     setBenchmarkVideos([]); setShowBenchmarks(false)
     setVariantSeed(null)
     setJobId(null); setJobStatus(null); setLoading(false)
@@ -289,7 +432,19 @@ export default function App() {
     <div style={s.root}>
       <div style={s.wrap}>
         <h1 style={s.h1}>🎬 AI 带货视频生成器</h1>
-        <p style={s.sub}>上传参考视频 + 产品图 → AI 自动分析风格并生成视频</p>
+        <p style={s.sub}>选产品 + 参考视频 → AI 自动分析风格并生成视频</p>
+
+        <div style={s.tabBar}>
+          <button style={s.tabBtn(tab === 'generate')} onClick={() => setTab('generate')}>🎬 生成视频</button>
+          <button style={s.tabBtn(tab === 'products')} onClick={() => setTab('products')}>📦 产品管理</button>
+          <button style={s.tabBtn(tab === 'history')} onClick={() => setTab('history')}>📜 历史</button>
+        </div>
+
+        {tab === 'products' && <ProductManager />}
+        {tab === 'history' && <HistoryView />}
+
+        {tab === 'generate' && (
+        <>
 
         {/* 参考视频 */}
         <div style={s.card}>
@@ -424,79 +579,102 @@ export default function App() {
           )}
         </div>
 
-        {/* 产品图 */}
+        {/* 选择产品 */}
         <div style={s.card}>
-          <div style={s.cardTitle}>产品图（{images.length} / 20）</div>
-          <DropZone label="上传产品图（最多 20 张）" accept="image/*" multiple type="image"
-            files={images} onFiles={f => setImages(prev => [...prev, ...f].slice(0, 20))} />
-          {images.length > 0 && (
-            <>
-              <div style={s.grid}>
-                {imagePreviews.map((src, i) => (
-                  <div key={i} style={{ position: 'relative' }}>
-                    <img src={src} alt={`img-${i + 1}`} style={s.thumb} />
-                    <div style={s.badge}>{i + 1}</div>
-                    <button style={s.rmBtn} onClick={e => { e.stopPropagation(); setImages(prev => prev.filter((_, idx) => idx !== i)) }}>×</button>
+          <div style={s.cardTitle}>选择产品</div>
+          {cachedProducts.length === 0 ? (
+            <div style={{ padding: 20, textAlign: 'center', color: '#888', fontSize: 13 }}>
+              暂无产品。<br />去 <strong>📦 产品管理</strong> tab 贴 TikTok Shop 链接抓取，再回来这里。
+            </div>
+          ) : (
+            <div style={s.prodPick}>
+              {cachedProducts.map(p => {
+                const active = productInfo?.productId === p.productId
+                return (
+                  <div key={p.productId} style={s.prodCard(active)} onClick={() => selectCachedProduct(p.productId)}>
+                    {p.coverImageUrl
+                      ? <img src={p.coverImageUrl} alt="" style={s.prodCardCover} loading="lazy" />
+                      : <div style={{ ...s.prodCardCover, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, color: '#bbb' }}>📦</div>}
+                    <div style={s.prodCardName}>{p.name || '(未命名)'}</div>
+                    <div style={s.prodCardMeta}>
+                      {p.region} · 图 {p.mainImageCount + p.detailImageCount + p.userImageCount}
+                      {p.userImageCount > 0 && ` (+${p.userImageCount} 自定义)`}
+                    </div>
                   </div>
-                ))}
-              </div>
-              <button style={{ ...s.btnGhost, marginTop: 10, fontSize: 12, padding: '5px 12px' }} onClick={() => setImages([])}>
-                清空全部
-              </button>
-            </>
-          )}
-        </div>
-
-        {/* 商品信息 */}
-        <div style={s.card}>
-          <div style={s.cardTitle}>商品信息（可选，推荐填写）</div>
-          <div style={{ fontSize: 12, color: '#888', marginBottom: 10 }}>
-            填入 TikTok Shop 商品链接，自动抓取面料、风格等信息，让 AI 生成更准确的面料描述。
-            <span style={{ color: '#f59e0b' }}> ⚠️ Region 必须与商品所在地区一致，否则接口不返回数据。</span>
-          </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-            <input
-              style={{ ...s.input, flex: 1 }}
-              placeholder="粘贴 TikTok Shop 商品链接或 product_id…"
-              value={productUrl}
-              onChange={e => setProductUrl(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && fetchProduct()}
-            />
-            <select style={{ ...s.select, width: 90, flexShrink: 0 }}
-              value={productRegion} onChange={e => setProductRegion(e.target.value)}>
-              {REGIONS.map(r => <option key={r} value={r}>{r}</option>)}
-            </select>
-            <button
-              style={{ ...s.btnPrimary(fetchingProduct || !productUrl.trim()), padding: '8px 16px', fontSize: 13, flexShrink: 0 }}
-              onClick={fetchProduct}
-              disabled={fetchingProduct || !productUrl.trim()}>
-              {fetchingProduct ? '抓取中…' : '抓取'}
-            </button>
-          </div>
-          {productError && (
-            <div style={{ marginTop: 8, fontSize: 12, color: '#be123c' }}>⚠️ {productError}</div>
+                )
+              })}
+            </div>
           )}
           {productInfo && (
-            <div style={{ marginTop: 12, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: 12, fontSize: 13 }}>
-              <div style={{ fontWeight: 600, color: '#15803d', marginBottom: 6 }}>✅ 商品信息已抓取</div>
-              <div style={{ color: '#166534', lineHeight: 1.7 }}>
-                <div><strong>商品名：</strong>{productInfo.name}</div>
-                {productInfo.materials && <div><strong>材质：</strong>{productInfo.materials}</div>}
-                {productInfo.style && <div><strong>风格：</strong>{productInfo.style}</div>}
-                {productInfo.season && <div><strong>季节：</strong>{productInfo.season}</div>}
-                {productInfo.design && <div><strong>设计：</strong>{productInfo.design}</div>}
-                {productInfo.variants?.map((v, i) => (
-                  <div key={i}><strong>{v.name}：</strong>{v.values.join(' / ')}</div>
-                ))}
-                {productInfo.price && <div><strong>价格：</strong>{productInfo.price}</div>}
-                {productInfo.categories?.length > 0 && (
-                  <div><strong>品类：</strong>{productInfo.categories.join(' > ')}</div>
-                )}
+            <div style={{ marginTop: 14, padding: 12, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, fontSize: 13 }}>
+              <div style={{ fontWeight: 600, color: '#15803d', marginBottom: 4 }}>✅ 已选：{productInfo.name?.slice(0, 60)}</div>
+              <div style={{ color: '#166534', fontSize: 12 }}>id: {productInfo.productId}</div>
+            </div>
+          )}
+          {productColorInventory && Object.keys(productColorInventory).length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <label style={s.label}>SKU 变体（强烈推荐：只用同一 SKU 的图防止生成串色）</label>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <select style={{ ...s.select, flex: 1 }} value={productSkuColor}
+                  onChange={e => setProductSkuColor(e.target.value)}>
+                  <option value="">— 不过滤（用全部图）—</option>
+                  {Object.entries(productColorInventory).map(([c, n]) => (
+                    <option key={c} value={c}>{c} （{n} 张）</option>
+                  ))}
+                </select>
+                <button style={{ ...s.btnGhost, padding: '8px 12px', fontSize: 12, whiteSpace: 'nowrap' }}
+                  disabled={!productInfo?.productId}
+                  onClick={async () => {
+                    if (!productInfo?.productId) return
+                    setProductSkuRecommendation({ loading: true })
+                    try {
+                      const r = await fetch(`${API}/product/${productInfo.productId}/recommend-sku`)
+                      const data = await r.json()
+                      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
+                      setProductSkuRecommendation(data)
+                    } catch (e) {
+                      setProductSkuRecommendation({ error: e.message })
+                    }
+                  }}>
+                  🌟 AI 推荐
+                </button>
               </div>
-              <button style={{ ...s.btnGhost, marginTop: 8, fontSize: 12, padding: '3px 10px', color: '#dc2626', borderColor: '#fca5a5' }}
-                onClick={() => { setProductInfo(null); setProductUrl('') }}>
-                清除
-              </button>
+              {productSkuRecommendation && (
+                <div style={{ marginTop: 6, padding: '8px 10px', background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 6, fontSize: 12 }}>
+                  {productSkuRecommendation.loading && <span>评估中…</span>}
+                  {productSkuRecommendation.error && <span style={{ color: '#b91c1c' }}>失败：{productSkuRecommendation.error}</span>}
+                  {productSkuRecommendation.recommended && (
+                    <>
+                      <strong>推荐：{productSkuRecommendation.recommended}</strong>
+                      {productSkuRecommendation.counts?.[productSkuRecommendation.recommended] && (
+                        <span> （{productSkuRecommendation.counts[productSkuRecommendation.recommended]} 张图）</span>
+                      )}
+                      <button style={{ ...s.btnGhost, marginLeft: 8, padding: '2px 8px', fontSize: 11 }}
+                        onClick={() => setProductSkuColor(productSkuRecommendation.recommended)}>
+                        应用
+                      </button>
+                      <div style={{ marginTop: 4, color: '#78350f' }}>{productSkuRecommendation.reason}</div>
+                    </>
+                  )}
+                  {!productSkuRecommendation.loading && !productSkuRecommendation.error && !productSkuRecommendation.recommended && (
+                    <span>{productSkuRecommendation.reason || '无法推荐'}</span>
+                  )}
+                </div>
+              )}
+              {productSkuColor && productInfo && (
+                (() => {
+                  const total = (productInfo.mainImageUrls?.length || 0) + (productInfo.detailImageUrls?.length || 0)
+                  if (total === 0) {
+                    return <div style={{ marginTop: 6, fontSize: 12, color: '#be123c' }}>⚠️ 没有符合该 SKU 的图，生成按钮已禁用。请去产品管理打标或选其他 SKU。</div>
+                  }
+                  return <div style={{ marginTop: 6, fontSize: 12, color: '#16a34a' }}>✓ {total} 张 {productSkuColor} 图将用于本次生成</div>
+                })()
+              )}
+            </div>
+          )}
+          {productColorInventory && Object.keys(productColorInventory).length === 0 && productAllImages && (
+            <div style={{ marginTop: 12, padding: 10, background: '#fef3c7', borderRadius: 6, fontSize: 12, color: '#92400e' }}>
+              ⚠️ 该产品所有图都未标颜色。建议先去 📦 产品管理 → 🪄 AI 一键识别颜色，再回来选 SKU 颜色防止生成串色。
             </div>
           )}
         </div>
@@ -579,44 +757,88 @@ export default function App() {
               </div>
             </div>
           )}
+
+          <div style={{ marginTop: 14, padding: 12, background: skipReferenceVideo ? '#fef3c7' : '#f9fafb', borderRadius: 8, border: '1px solid', borderColor: skipReferenceVideo ? '#f59e0b' : '#e5e7eb' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#1f2937' }}>
+              <input
+                type="checkbox"
+                checked={skipReferenceVideo}
+                onChange={e => setSkipReferenceVideo(e.target.checked)}
+                style={{ width: 16, height: 16, cursor: 'pointer' }}
+              />
+              🧪 跳过 Seedance reference_video（A/B 测试）
+            </label>
+            <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6, marginLeft: 24 }}>
+              Gemini 仍照常分析 TikTok 视频（DNA / shot_sequence），但不把切片传给 Seedance 当视觉参考。用来对比 reference_video 对成片的影响。
+            </div>
+          </div>
         </div>
 
         {error && <div style={s.err}>⚠️ {error}</div>}
 
+        {(() => {
+          const zeroAfterFilter = productSkuColor && productInfo && ((productInfo.mainImageUrls?.length || 0) + (productInfo.detailImageUrls?.length || 0)) === 0
+          const submitDisabled = loading || !!zeroAfterFilter
+          return (
         <div style={{ display: 'flex', gap: 12, marginBottom: 20 }}>
-          <button style={s.btnPrimary(loading)} onClick={handleSubmit} disabled={loading}>
+          <button style={s.btnPrimary(submitDisabled)} onClick={handleSubmit} disabled={submitDisabled}>
             {loading ? '生成中…' : '🚀 开始生成'}
           </button>
           {(jobId || error) && (
             <button style={s.btnGhost} onClick={reset}>重置</button>
           )}
         </div>
+          )
+        })()}
 
         {/* 进度 */}
-        {loading && (
-          <div style={s.card}>
-            <div style={s.cardTitle}>处理进度</div>
-            {STEPS.map((step, i) => {
-              const done = i < currentStep
-              const active = i === currentStep
-              return (
-                <div key={i} style={s.stepRow(done, active)}>
-                  <div style={s.dot(done, active)}>
-                    {done ? '✓' : step.icon}
+        {loading && (() => {
+          const label = jobStatus?.stepLabel || '准备中…'
+          const subElapsed = subStepStart ? Math.floor((now - subStepStart) / 1000) : 0
+          // 根据 stepLabel 给上下文提示
+          let hint = ''
+          let icon = '⏳'
+          if (/Snaptik/.test(label)) { icon = '🔗'; hint = '通常 ~5 秒' }
+          else if (/上传产品图|kie\.ai/.test(label)) { icon = '📤'; hint = '通常 10-30 秒' }
+          else if (/Gemini 分析参考视频/.test(label)) { icon = '🧠'; hint = '通常 30-90 秒 (Pass 1)' }
+          else if (/上传选中.*kie\.ai/.test(label)) { icon = '🖼️'; hint = '通常 10-20 秒' }
+          else if (/截取参考视频片段/.test(label)) { icon = '✂️'; hint = '通常 5-15 秒' }
+          else if (/程序化校验/.test(label)) { icon = '🛡️'; hint = '即时' }
+          else if (/二次评估/.test(label)) { icon = '🔍'; hint = 'Gemini 审查 prompt 质量，~30 秒' }
+          else if (/修订/.test(label)) { icon = '✏️'; hint = 'AI 自动修订 — 最多 2 轮，2 轮还过不了整体 fail' }
+          else if (/创建.*Seedance/.test(label)) { icon = '🎬'; hint = '即时' }
+          else if (/Seedance 生成中/.test(label)) {
+            icon = '⏳'
+            hint = `Seedance 排队 + 生成，通常 5-25 分钟${taskState ? ` · 当前 kie.ai: ${taskState}` : ''}`
+          }
+          return (
+            <div style={s.card}>
+              <div style={s.cardTitle}>处理进度</div>
+              {/* 当前活跃步骤大图标 + 实时 label + elapsed */}
+              <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', padding: '12px 0 14px', borderBottom: '1px solid #f3f3f3', marginBottom: 10 }}>
+                <div style={{ fontSize: 32 }}>{icon}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 600, color: '#111', marginBottom: 2 }}>{label}</div>
+                  <div style={{ fontSize: 12, color: '#888' }}>
+                    本步骤已 {fmtTime(subElapsed)}{hint && ` · ${hint}`}
                   </div>
-                  <span>{step.label}</span>
-                  {active && (
-                    <span style={{ marginLeft: 'auto', fontSize: 12, color: '#6366f1' }}>
-                      {i === 3
-                        ? `${fmtTime(waitSec)} ${taskState ? `· ${taskState}` : ''}`
-                        : jobStatus?.stepLabel || '进行中…'}
-                    </span>
-                  )}
+                  <div style={{ fontSize: 11, color: '#bbb', marginTop: 2 }}>总耗时 {fmtTime(waitSec)}</div>
                 </div>
-              )
-            })}
-          </div>
-        )}
+              </div>
+              {/* 4 个大阶段概览 */}
+              {STEPS.map((step, i) => {
+                const done = i < currentStep
+                const active = i === currentStep
+                return (
+                  <div key={i} style={s.stepRow(done, active)}>
+                    <div style={s.dot(done, active)}>{done ? '✓' : step.icon}</div>
+                    <span>{step.label}</span>
+                  </div>
+                )
+              })}
+            </div>
+          )
+        })()}
 
         {/* 结果 */}
         {jobStatus && (
@@ -694,6 +916,9 @@ export default function App() {
               </div>
             )}
           </div>
+        )}
+
+        </>
         )}
       </div>
     </div>

@@ -1,14 +1,35 @@
 import express from 'express'
+import multer from 'multer'
 import axios from 'axios'
 import { writeFile, unlink, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import path from 'path'
 import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
-import { uploadFileToKie } from '../services/kieai-upload.js'
-import { getProductCache, saveProduct, listBenchmarkVideos } from '../services/db.js'
+import { uploadMediaFile } from '../services/media-upload.js'
+import {
+  getProductCache, saveProduct, listBenchmarkVideos,
+  listProducts, getProductFull, updateProductImages, renameProduct, deleteProduct,
+  setImageColor, bulkSetImageColors, getProductSkuOptions,
+} from '../services/db.js'
+import { detectImageColors, recommendBestSku } from '../services/gemini-color-tagger.js'
 
 const router = express.Router()
+
+// multer: 临时存到 ./uploads/，处理完上传 kie.ai 后清理
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, './uploads/'),
+    filename: (req, file, cb) => {
+      cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(file.originalname)}`)
+    },
+  }),
+  limits: { fileSize: 20 * 1024 * 1024 },  // 20MB / 图
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase().replace('.', '')
+    cb(null, /jpeg|jpg|png|webp/.test(ext))
+  },
+})
 
 const TIKHUB_API_KEY = 'jLENGegc5UayyV+YNqaF+Q6LJhDSZqs90T7/oxjebuCXm2q6e3GKdSu9Kw=='
 const TIKHUB_BASE = 'https://api.tikhub.io'
@@ -196,7 +217,7 @@ router.get('/fetch', async (req, res) => {
     ].slice(0, 15) // 最多 15 张避免太慢
     const mainCount = (productInfo.mainImageUrls || []).slice(0, 15).length
 
-    console.log(`[Product] 下载并上传 ${allTikTokUrls.length} 张商品图到 kie.ai 稳定存储...`)
+    console.log(`[Product] 下载并上传 ${allTikTokUrls.length} 张商品图到 S3 稳定存储...`)
     const stableUrls = []
     for (let i = 0; i < allTikTokUrls.length; i++) {
       try {
@@ -207,7 +228,7 @@ router.get('/fetch', async (req, res) => {
           headers: { 'User-Agent': 'Mozilla/5.0' },
         })
         await writeFile(tmpPath, dl.data)
-        const url = await uploadFileToKie(tmpPath, `product-${i + 1}.jpg`)
+        const url = await uploadMediaFile(tmpPath, `product-${i + 1}.jpg`)
         await unlink(tmpPath).catch(() => {})
         stableUrls.push(url)
         console.log(`  [stable] ${i + 1}/${allTikTokUrls.length} ✅`)
@@ -251,6 +272,192 @@ router.get('/benchmark-videos', (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
+})
+
+// ===== 产品管理 API =====
+
+// GET /api/product/list — 列出所有缓存产品（按 last_used_at DESC）
+router.get('/list', (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 200, 500)
+    const offset = parseInt(req.query.offset) || 0
+    const items = listProducts({ limit, offset })
+    res.json({ count: items.length, items })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// GET /api/product/cache/:productId — 单个产品的完整缓存详情（含 user_image_urls 分开列出）
+// 注意：路径前缀 /cache/ 区分于 /fetch（爬虫）和 /benchmark-videos（标杆）
+router.get('/cache/:productId', (req, res) => {
+  try {
+    const product = getProductFull(req.params.productId)
+    if (!product) return res.status(404).json({ error: 'Product not cached' })
+    res.json({ product })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST /api/product/:productId/images — 上传自定义图（multipart），每张走 kie.ai 拿稳定 URL，追加到 user_image_urls
+// 可选 form field "color"：新上传的图默认绑定到此颜色（否则空串=未标）
+router.post('/:productId/images', upload.array('images', 10), async (req, res) => {
+  const { productId } = req.params
+  const product = getProductFull(productId)
+  if (!product) {
+    // 清理已上传的临时文件
+    for (const f of req.files || []) await unlink(f.path).catch(() => {})
+    return res.status(404).json({ error: 'Product not cached, fetch it first via /api/product/fetch' })
+  }
+  const files = req.files || []
+  if (files.length === 0) return res.status(400).json({ error: 'No images uploaded' })
+
+  const uploadColor = (req.body.color || '').trim()
+  const successUrls = []
+  const failures = []
+  for (const f of files) {
+    try {
+      const url = await uploadMediaFile(f.path, f.originalname)
+      successUrls.push(url)
+    } catch (e) {
+      failures.push({ name: f.originalname, error: e.message })
+    } finally {
+      await unlink(f.path).catch(() => {})
+    }
+  }
+
+  const newUserImages = [...product.userImageUrls, ...successUrls]
+  const newUserColors = [...product.userImageColors, ...successUrls.map(() => uploadColor)]
+  updateProductImages(productId, newUserImages, newUserColors)
+  res.json({
+    added: successUrls,
+    failed: failures,
+    userImageUrls: newUserImages,
+    userImageColors: newUserColors,
+  })
+})
+
+// PATCH /api/product/:productId/image-color — body: { url, color } 单张图打标
+router.patch('/:productId/image-color', express.json(), (req, res) => {
+  const { url, color } = req.body
+  if (!url) return res.status(400).json({ error: '缺少 url 参数' })
+  const ok = setImageColor(req.params.productId, url, color || '')
+  if (!ok) return res.status(404).json({ error: 'URL not found in this product' })
+  res.json({ ok: true, url, color: (color || '').trim() })
+})
+
+// POST /api/product/:productId/bulk-tag — body: { urls: [...], color } 批量打标
+router.post('/:productId/bulk-tag', express.json(), (req, res) => {
+  const { urls, color } = req.body
+  if (!Array.isArray(urls) || urls.length === 0) return res.status(400).json({ error: '缺少 urls 数组' })
+  const success = bulkSetImageColors(req.params.productId, urls, color || '')
+  res.json({ ok: true, taggedCount: success, total: urls.length })
+})
+
+// GET /api/product/:productId/sku-options — 返回该产品的 SKU 词表（约束 AI 打标）
+router.get('/:productId/sku-options', (req, res) => {
+  try {
+    res.json(getProductSkuOptions(req.params.productId))
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// GET /api/product/:productId/recommend-sku — AI 推荐最适合生成视频的 SKU
+router.get('/:productId/recommend-sku', async (req, res) => {
+  try {
+    const product = getProductFull(req.params.productId)
+    if (!product) return res.status(404).json({ error: 'Product not found' })
+    const result = await recommendBestSku(product)
+    res.json(result)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST /api/product/:productId/ai-detect-colors — AI 一键识别图片 SKU（用产品 variants 词表约束）
+// body: { scope: 'untagged' | 'all' }，默认 untagged。返回识别结果但同时已写 DB
+router.post('/:productId/ai-detect-colors', express.json(), async (req, res) => {
+  const { productId } = req.params
+  const scope = req.body?.scope === 'all' ? 'all' : 'untagged'
+  const product = getProductFull(productId)
+  if (!product) return res.status(404).json({ error: 'Product not found' })
+
+  // 拿这个产品的 SKU 词表（变体），如果没有就走自由识别老路
+  const skuOptions = getProductSkuOptions(productId)
+
+  // 收集待识别的 urls：scope='untagged' 只挑现在没颜色的
+  const sections = [
+    { urls: product.mainImageUrls, colors: product.mainImageColors },
+    { urls: product.detailImageUrls, colors: product.detailImageColors },
+    { urls: product.userImageUrls, colors: product.userImageColors },
+  ]
+  const targetUrls = []
+  for (const sec of sections) {
+    for (let i = 0; i < sec.urls.length; i++) {
+      if (scope === 'all' || !(sec.colors[i] || '').trim()) {
+        targetUrls.push(sec.urls[i])
+      }
+    }
+  }
+  if (targetUrls.length === 0) {
+    return res.json({ taggedCount: 0, total: 0, results: [], skippedCount: 0, message: '没有需要识别的图（所有图都已标）' })
+  }
+
+  try {
+    const results = await detectImageColors(targetUrls, { skuOptions: skuOptions.values })
+    // 把每个 url → 它的 color 写回 DB（逐张调 setImageColor）
+    let taggedCount = 0
+    const failed = []
+    for (const r of results) {
+      if (r.success && r.color) {
+        if (setImageColor(productId, r.url, r.color)) taggedCount++
+      } else {
+        failed.push({ url: r.url, error: r.error || 'no color returned' })
+      }
+    }
+    res.json({
+      taggedCount,
+      total: targetUrls.length,
+      results: results.map(r => ({ url: r.url, color: r.color, success: r.success })),
+      failed,
+    })
+  } catch (e) {
+    res.status(500).json({ error: `AI 识别失败：${e.message}` })
+  }
+})
+
+// DELETE /api/product/:productId/images — body: { url } 从 user_image_urls 移除指定 URL（同时移除对齐的 color）
+router.delete('/:productId/images', express.json(), (req, res) => {
+  const { productId } = req.params
+  const { url } = req.body
+  if (!url) return res.status(400).json({ error: '缺少 url 参数' })
+  const product = getProductFull(productId)
+  if (!product) return res.status(404).json({ error: 'Product not found' })
+
+  const idx = product.userImageUrls.indexOf(url)
+  if (idx < 0) return res.status(404).json({ error: 'URL not found in user_image_urls' })
+  const filteredUrls = product.userImageUrls.filter((_, i) => i !== idx)
+  const filteredColors = product.userImageColors.filter((_, i) => i !== idx)
+  updateProductImages(productId, filteredUrls, filteredColors)
+  res.json({ userImageUrls: filteredUrls, userImageColors: filteredColors })
+})
+
+// PATCH /api/product/:productId — body: { name } 重命名
+router.patch('/:productId', express.json(), (req, res) => {
+  const { name } = req.body
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: '缺少 name 参数' })
+  const ok = renameProduct(req.params.productId, name.trim())
+  if (!ok) return res.status(404).json({ error: 'Product not found' })
+  res.json({ ok: true, name: name.trim() })
+})
+
+// DELETE /api/product/:productId — 删除整个产品缓存
+router.delete('/:productId', (req, res) => {
+  const ok = deleteProduct(req.params.productId)
+  if (!ok) return res.status(404).json({ error: 'Product not found' })
+  res.json({ ok: true })
 })
 
 export default router

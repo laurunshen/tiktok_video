@@ -7,11 +7,11 @@ import path from 'path'
 import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import axios from 'axios'
+import sharp from 'sharp'
 
+// AI Studio API key 直连（详见 gemini.js 注释）
 const genai = new GoogleGenAI({
-  vertexai: true,
-  project: 'eternal-concept-492907-q3',
-  location: 'global',
+  apiKey: process.env.GEMINI_API_KEY,
   httpOptions: { timeout: 600000 },
 })
 
@@ -30,15 +30,61 @@ async function videoUrlToInlinePart(url) {
   }
 }
 
+// 下载 + 压缩 产品参考图，给 judge 做视觉对比用
+async function imageUrlToInlinePart(url) {
+  const res = await axios.get(url, {
+    responseType: 'arraybuffer',
+    timeout: 30000,
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+  })
+  let buffer = await sharp(Buffer.from(res.data))
+    .resize({ width: 1024, height: 1024, fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 80 })
+    .toBuffer()
+  if (buffer.length > 1024 * 1024) {
+    buffer = await sharp(buffer).jpeg({ quality: 60 }).toBuffer()
+  }
+  return {
+    inlineData: { mimeType: 'image/jpeg', data: buffer.toString('base64') },
+  }
+}
+
 /**
  * 评分单条生成视频（无标杆对比）
+ * referenceImageUrls：传给 Seedance 的原始产品图（让 judge 做视觉对比，product_accuracy 才有依据）
  */
-export async function judgeGeneratedVideo({ generatedVideoUrl, productInfo, prompt }) {
+export async function judgeGeneratedVideo({ generatedVideoUrl, productInfo, prompt, referenceImageUrls = [] }) {
   const parts = []
-  parts.push({
-    text: `You are a senior TikTok creative director reviewing an AI-generated UGC product video. Watch the video carefully and score it.`,
-  })
+
+  // 1) 先放参考图（带 label，让 judge 知道"产品应该长这样"）
+  const refImages = []
+  if (Array.isArray(referenceImageUrls) && referenceImageUrls.length > 0) {
+    const cap = Math.min(referenceImageUrls.length, 6)  // 最多 6 张避免 payload 太大
+    parts.push({
+      text: `You are a senior TikTok creative director. First, here are ${cap} REFERENCE IMAGES showing what the actual product looks like — use these to judge whether the bra in the AI-generated video matches the real product:`,
+    })
+    for (let i = 0; i < cap; i++) {
+      try {
+        const p = await imageUrlToInlinePart(referenceImageUrls[i])
+        parts.push({ text: `\n[Reference image ${i + 1} of ${cap}]` })
+        parts.push(p)
+        refImages.push(referenceImageUrls[i])
+      } catch (e) {
+        console.warn(`[judge] ref image ${i + 1} 下载失败（跳过）: ${e.message}`)
+      }
+    }
+    parts.push({ text: `\n\nNow watch the AI-generated video below and judge how well its bra matches those reference images.\n` })
+  } else {
+    parts.push({
+      text: `You are a senior TikTok creative director reviewing an AI-generated UGC product video. Watch the video carefully and score it.`,
+    })
+  }
+
+  // 2) 视频
   parts.push(await videoUrlToInlinePart(generatedVideoUrl))
+
+  // 3) 评分指令
+  const hasRefs = refImages.length > 0
   parts.push({
     text: `
 
@@ -47,13 +93,15 @@ Color featured: ${productInfo?.color || 'not specified'}
 
 Score the video on these dimensions (0-10 each):
 
-1. PRODUCT_ACCURACY — does the bra in the video match the actual product (silhouette, color, edge, structure)?
+1. PRODUCT_ACCURACY — ${hasRefs
+      ? `compare the bra in the VIDEO against the ${refImages.length} REFERENCE IMAGES at the top of this prompt. Score how well it matches: silhouette / neckline shape / color / edge style / underwire visibility / strap style / closure / distinguishing details. 10 = identical to references; 0 = completely different garment.`
+      : `does the bra in the video look like a coherent real product (silhouette, color, edges, structure)? NOTE: no reference images provided — judge based on internal consistency only.`}
 2. CHARACTER_CONSISTENCY — same person across all cuts (face/hair/makeup/body)?
-3. NATURAL_UGC_FEEL — looks like authentic creator-shot phone video, not AI-generated?
-4. ANATOMICAL_CORRECTNESS — hands/fingers/face proportions all natural?
+3. NATURAL_UGC_FEEL — looks like authentic creator-shot phone video, not AI-generated? Specifically watch for: too-perfect symmetric face / "plastic" skin / artificial lighting / unnatural smile holds.
+4. ANATOMICAL_CORRECTNESS — hands/fingers/face proportions all natural? No fused / extra / melted fingers.
 5. AUDIO_QUALITY — clean indoor voice, no wind/echo/glitches?
 6. NO_TEXT_LEAKAGE — zero captions, no marketing text overlays?
-7. NARRATIVE_CREATIVITY — does the video have a memorable hook/structure, or does it feel templated/generic?
+7. NARRATIVE_CREATIVITY — does the video have a memorable hook/structure, or does it feel templated/generic? NOTE: this video is INTENTIONALLY a faithful adaptation of a reference creator's script, so "feels like the reference" is GOOD not bad; only mark down if it feels machine-templated (not human-templated).
 8. SHARE_WORTHINESS — would you share or save this video as a real TikTok user?
 
 Return ONLY valid JSON:
@@ -71,7 +119,8 @@ Return ONLY valid JSON:
   "overall": 0-10,
   "top_issues": ["specific issue 1", "specific issue 2", ...],
   "what_worked": ["specific strength 1", ...],
-  "verdict": "one sentence summary"
+  "verdict": "one sentence summary",
+  "reference_match_notes": "${hasRefs ? 'specific notes on how the video bra deviates from the reference images (or "matches reference cleanly")' : 'N/A — no reference images provided'}"
 }`,
   })
 
