@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import ProductManager from './ProductManager.jsx'
 import HistoryView from './HistoryView.jsx'
+import AffiliateVideos from './AffiliateVideos.jsx'
 
 const API = '/api'
 
@@ -100,7 +101,7 @@ const CATEGORIES = [
 const REGIONS = ['SG', 'US', 'GB', 'MY', 'TH', 'PH', 'VN', 'ID', 'AU']
 
 export default function App() {
-  const [tab, setTab] = useState('generate')  // 'generate' | 'products'
+  const [tab, setTab] = useState('generate')  // 'generate' | 'products' | 'history' | 'affiliate'
   const [cachedProducts, setCachedProducts] = useState([])
   // 选中缓存产品后的颜色过滤
   const [productSkuColor, setProductSkuColor] = useState('')  // '' = 不过滤；其他 = 只用该颜色的图
@@ -418,6 +419,16 @@ export default function App() {
     setCurrentStep(-1); setError(null); setWaitSec(0); setCategory('lingerie')
   }
 
+  // 只清视频和结果，保留产品/SKU/设置
+  const resetVideoOnly = () => {
+    stopTimers()
+    setRefVideo([])
+    setTiktokVideoUrl('')
+    setJobId(null); setJobStatus(null); setLoading(false)
+    setCurrentStep(-1); setError(null); setWaitSec(0)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   const copyPrompt = () => {
     navigator.clipboard.writeText(jobStatus.prompt)
     setCopied(true)
@@ -455,10 +466,23 @@ export default function App() {
           <button style={s.tabBtn(tab === 'generate')} onClick={() => setTab('generate')}>🎬 生成视频</button>
           <button style={s.tabBtn(tab === 'products')} onClick={() => setTab('products')}>📦 产品管理</button>
           <button style={s.tabBtn(tab === 'history')} onClick={() => setTab('history')}>📜 历史</button>
+          <button style={s.tabBtn(tab === 'affiliate')} onClick={() => setTab('affiliate')}>📊 达人视频库</button>
         </div>
 
-        {tab === 'products' && <ProductManager />}
-        {tab === 'history' && <HistoryView />}
+        <div style={{ display: tab === 'products' ? '' : 'none' }}><ProductManager /></div>
+        <div style={{ display: tab === 'history' ? '' : 'none' }}><HistoryView /></div>
+        <div style={{ display: tab === 'affiliate' ? '' : 'none' }}>
+          <AffiliateVideos
+            onUseVideo={url => {
+              setTiktokVideoUrl(url)
+              setRefVideo([])
+              setJobId(null); setJobStatus(null); setLoading(false)
+              setCurrentStep(-1); setError(null); setWaitSec(0)
+              setTab('generate')
+              window.scrollTo({ top: 0, behavior: 'smooth' })
+            }}
+          />
+        </div>
 
         {tab === 'generate' && (
         <>
@@ -807,8 +831,13 @@ export default function App() {
           {jobStatus?.status === 'failed' && !loading && (jobStatus?.taskCount ?? 0) === 0 && (
             <button style={{ ...s.btnGhost, background: '#fef2f2', borderColor: '#fca5a5', color: '#b91c1c' }} onClick={handleSubmit}>🔄 重试（完整流程）</button>
           )}
-          {(jobId || error) && (
-            <button style={s.btnGhost} onClick={reset}>重置</button>
+          {(jobId || error) && !loading && (
+            <button style={s.btnGhost} onClick={resetVideoOnly} title="保留产品和SKU，只清空视频和结果">
+              🔄 换视频再生成
+            </button>
+          )}
+          {(jobId || error) && !loading && (
+            <button style={{ ...s.btnGhost, fontSize: 12, color: '#999' }} onClick={reset}>完全重置</button>
           )}
         </div>
           )
@@ -882,6 +911,12 @@ export default function App() {
                   style={{ padding: '3px 12px', borderRadius: 6, border: '1px solid #fca5a5', background: '#fef2f2', color: '#b91c1c', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
                   onClick={handleSubmit}
                 >🔄 重试（完整流程）</button>
+              )}
+              {jobStatus.status === 'completed' && (
+                <button
+                  style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid #6366f1', background: '#eef2ff', color: '#6366f1', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+                  onClick={resetVideoOnly}
+                >🔄 换视频再生成</button>
               )}
               <span style={{ marginLeft: 'auto', fontSize: 12, color: '#aaa' }}>{jobId}</span>
             </div>

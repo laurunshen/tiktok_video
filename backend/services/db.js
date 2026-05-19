@@ -149,6 +149,14 @@ export async function initDb() {
         affiliate_gmv DOUBLE PRECISION,
         affiliate_likes INTEGER,
         affiliate_comments INTEGER,
+        published_at TEXT,
+        affiliate_orders INTEGER,
+        affiliate_aov DOUBLE PRECISION,
+        affiliate_commission DOUBLE PRECISION,
+        affiliate_fixed_fee TEXT,
+        affiliate_rpm DOUBLE PRECISION,
+        affiliate_refund_count INTEGER,
+        affiliate_refund_gmv DOUBLE PRECISION,
         source TEXT,
         is_benchmark INTEGER DEFAULT 0,
         benchmark_reason TEXT,
@@ -182,6 +190,15 @@ export async function initDb() {
     await addCol('products', 'main_image_thumb_urls', 'TEXT')
     await addCol('products', 'detail_image_thumb_urls', 'TEXT')
     await addCol('products', 'user_image_thumb_urls', 'TEXT')
+    // reference_videos 新增联盟数据列
+    await addCol('reference_videos', 'published_at', 'TEXT')
+    await addCol('reference_videos', 'affiliate_orders', 'INTEGER')
+    await addCol('reference_videos', 'affiliate_aov', 'DOUBLE PRECISION')
+    await addCol('reference_videos', 'affiliate_commission', 'DOUBLE PRECISION')
+    await addCol('reference_videos', 'affiliate_fixed_fee', 'TEXT')
+    await addCol('reference_videos', 'affiliate_rpm', 'DOUBLE PRECISION')
+    await addCol('reference_videos', 'affiliate_refund_count', 'INTEGER')
+    await addCol('reference_videos', 'affiliate_refund_gmv', 'DOUBLE PRECISION')
 
     // --- 清理僵尸 job（重启时 processing 状态 = 进程被杀，无人接管） ---
     const zombie = await client.query(`
@@ -671,6 +688,56 @@ export async function bulkSetImageColors(productId, urls, color) {
     if (await setImageColor(productId, url, color)) success++
   }
   return success
+}
+
+// 批量写多张图各自的颜色，只做 3 次 DB 操作（读一次，改内存，写一次，每个 section 各一次）
+// urlColorMap: [{ url, color }, ...]
+export async function batchSetImageColors(productId, urlColorMap) {
+  if (!urlColorMap || urlColorMap.length === 0) return 0
+  const { rows } = await pool.query(
+    `SELECT main_image_urls, detail_image_urls, user_image_urls,
+            main_image_colors, detail_image_colors, user_image_colors
+     FROM products WHERE product_id = $1`,
+    [productId]
+  )
+  if (!rows[0]) return 0
+  const row = rows[0]
+  const sections = {
+    main:   { urls: JSON.parse(row.main_image_urls   || '[]'), colors: JSON.parse(row.main_image_colors   || '[]') },
+    detail: { urls: JSON.parse(row.detail_image_urls || '[]'), colors: JSON.parse(row.detail_image_colors || '[]') },
+    user:   { urls: JSON.parse(row.user_image_urls   || '[]'), colors: JSON.parse(row.user_image_colors   || '[]') },
+  }
+  // 确保 colors 数组长度对齐
+  for (const [, sec] of Object.entries(sections)) {
+    while (sec.colors.length < sec.urls.length) sec.colors.push('')
+  }
+  // 建 url → {section, index} 查找表
+  const lookup = new Map()
+  for (const [sec, { urls }] of Object.entries(sections)) {
+    urls.forEach((u, i) => lookup.set(u, { sec, i }))
+  }
+  let taggedCount = 0
+  for (const { url, color } of urlColorMap) {
+    const loc = lookup.get(url)
+    if (!loc) continue
+    sections[loc.sec].colors[loc.i] = String(color || '').trim()
+    taggedCount++
+  }
+  // 一次写回（3 个 section 一条 UPDATE）
+  await pool.query(
+    `UPDATE products SET
+       main_image_colors=$1, detail_image_colors=$2, user_image_colors=$3,
+       last_used_at=$4
+     WHERE product_id=$5`,
+    [
+      JSON.stringify(sections.main.colors),
+      JSON.stringify(sections.detail.colors),
+      JSON.stringify(sections.user.colors),
+      Date.now(),
+      productId,
+    ]
+  )
+  return taggedCount
 }
 
 export async function renameProduct(productId, newName) {

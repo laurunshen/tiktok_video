@@ -10,7 +10,7 @@ import { uploadMediaFile, uploadMediaFileWithThumb } from '../services/media-upl
 import {
   getProductCache, saveProduct, listBenchmarkVideos,
   listProducts, getProductFull, updateProductImages, renameProduct, deleteProduct,
-  setImageColor, bulkSetImageColors, getProductSkuOptions,
+  setImageColor, bulkSetImageColors, batchSetImageColors, getProductSkuOptions,
 } from '../services/db.js'
 import { detectImageColors, recommendBestSku } from '../services/gemini-color-tagger.js'
 
@@ -289,6 +289,67 @@ router.get('/benchmark-videos', async (req, res) => {
   }
 })
 
+// GET /api/product/affiliate-videos — 达人带货视频库（支持筛选 + 排序 + 分页）
+// query: page, limit, sort, order, author, dateFrom, dateTo, minGmv, maxGmv
+router.get('/affiliate-videos', async (req, res) => {
+  const page   = Math.max(1, parseInt(req.query.page) || 1)
+  const limit  = Math.min(parseInt(req.query.limit) || 50, 200)
+  const offset = (page - 1) * limit
+
+  const SORT_WHITELIST = ['affiliate_gmv','affiliate_rpm','impressions','affiliate_orders','affiliate_likes','affiliate_comments','ctr','published_at']
+  const sort  = SORT_WHITELIST.includes(req.query.sort) ? req.query.sort : 'affiliate_gmv'
+  const order = req.query.order === 'asc' ? 'ASC' : 'DESC'
+
+  const author   = req.query.author?.trim() || null
+  const dateFrom = req.query.dateFrom || null   // YYYY-MM-DD
+  const dateTo   = req.query.dateTo || null
+  const minGmv   = req.query.minGmv ? parseFloat(req.query.minGmv) : null
+  const maxGmv   = req.query.maxGmv ? parseFloat(req.query.maxGmv) : null
+
+  const params = []
+  let pi = 0
+  const np = v => { params.push(v); return `$${++pi}` }
+
+  const wheres = []
+  if (author)   wheres.push(`author_username ILIKE ${np('%' + author + '%')}`)
+  if (dateFrom) wheres.push(`published_at >= ${np(dateFrom)}`)
+  if (dateTo)   wheres.push(`published_at <= ${np(dateTo)}`)
+  if (minGmv != null) wheres.push(`affiliate_gmv >= ${np(minGmv)}`)
+  if (maxGmv != null) wheres.push(`affiliate_gmv <= ${np(maxGmv)}`)
+
+  const where = wheres.length ? 'WHERE ' + wheres.join(' AND ') : ''
+
+  try {
+    const { pool } = await import('../services/db.js')
+    // 分页参数单独追加，count 查询不需要
+    const whereParams = [...params]
+    const dataParams  = [...params, limit, offset]
+    const limitPh     = `$${pi + 1}`
+    const offsetPh    = `$${pi + 2}`
+    const [dataRes, cntRes] = await Promise.all([
+      pool.query(`
+        SELECT video_id, video_url, author_username, title, published_at,
+               affiliate_gmv, revenue, affiliate_orders, affiliate_aov,
+               affiliate_commission, impressions, ctr, affiliate_rpm,
+               affiliate_refund_count, affiliate_refund_gmv,
+               affiliate_comments, affiliate_likes, is_benchmark
+        FROM reference_videos
+        ${where}
+        ORDER BY ${sort} ${order} NULLS LAST
+        LIMIT ${limitPh} OFFSET ${offsetPh}
+      `, dataParams),
+      pool.query(`SELECT COUNT(*) AS c FROM reference_videos ${where}`, whereParams),
+    ])
+    res.json({
+      total: parseInt(cntRes.rows[0].c, 10),
+      page, limit,
+      videos: dataRes.rows,
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // ===== 产品管理 API =====
 
 // GET /api/product/list — 列出所有缓存产品（按 last_used_at DESC）
@@ -426,16 +487,17 @@ router.post('/:productId/ai-detect-colors', express.json(), async (req, res) => 
 
   try {
     const results = await detectImageColors(targetUrls, { skuOptions: skuOptions.values })
-    // 把每个 url → 它的 color 写回 DB（逐张调 setImageColor）
-    let taggedCount = 0
     const failed = []
+    const toWrite = []
     for (const r of results) {
       if (r.success && r.color) {
-        if (await setImageColor(productId, r.url, r.color)) taggedCount++
+        toWrite.push({ url: r.url, color: r.color })
       } else {
         failed.push({ url: r.url, error: r.error || 'no color returned' })
       }
     }
+    // 一次性批量写回 DB（原来逐张写：53张×3次RDS = 159次；现在：1次读+1次写 = 2次）
+    const taggedCount = await batchSetImageColors(productId, toWrite)
     res.json({
       taggedCount,
       total: targetUrls.length,

@@ -51,13 +51,15 @@ export async function detectImageColors(urls, options = {}) {
     // 1) 并行下载这一批
     const parts = []
     const successIndices = []
+    const downloadResults = await Promise.all(
+      batch.map(url => imageUrlToInlinePart(url).then(p => ({ ok: true, p })).catch(e => ({ ok: false, e })))
+    )
     for (let i = 0; i < batch.length; i++) {
-      try {
-        const p = await imageUrlToInlinePart(batch[i])
-        parts.push(p)
+      if (downloadResults[i].ok) {
+        parts.push(downloadResults[i].p)
         successIndices.push(i)
-      } catch (e) {
-        results[start + i] = { url: batch[i], color: '', success: false, error: `download fail: ${e.message}` }
+      } else {
+        results[start + i] = { url: batch[i], color: '', success: false, error: `download fail: ${downloadResults[i].e.message}` }
       }
     }
 
@@ -180,13 +182,16 @@ export async function recommendBestSku(product) {
   const parts = []
   for (const { sku, urls } of samples) {
     parts.push({ text: `\n=== SKU: ${sku} (${urls.length} sample images of ${counts[sku]} total) ===` })
-    for (let i = 0; i < urls.length; i++) {
-      try {
-        const p = await imageUrlToInlinePart(urls[i])
-        parts.push({ text: `[${sku} - img ${i + 1}]` })
-        parts.push(p)
-      } catch (e) {
-        // 个别图下载失败不阻塞
+    const downloaded = await Promise.all(
+      urls.map((u, i) => imageUrlToInlinePart(u)
+        .then(p => ({ ok: true, p, i }))
+        .catch(() => ({ ok: false, i }))
+      )
+    )
+    for (const d of downloaded) {
+      if (d.ok) {
+        parts.push({ text: `[${sku} - img ${d.i + 1}]` })
+        parts.push(d.p)
       }
     }
   }
