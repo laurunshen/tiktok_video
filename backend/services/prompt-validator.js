@@ -127,7 +127,6 @@ export function validateGeminiOutput(geminiResult, { targetDuration, finalRefere
   // （Seedance 看到多色会随机抓一个，导致颜色不可控）
   const colorVal = (features.color || '').trim()
   if (colorVal) {
-    // 检测多个用 / , 或 " or " " and " 分隔的颜色
     const multiColorPattern = /[,/]|\bor\b|\band\b/i
     if (multiColorPattern.test(colorVal)) {
       issues.push({

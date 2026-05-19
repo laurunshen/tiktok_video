@@ -386,6 +386,26 @@ export default function HistoryView() {
     return () => clearInterval(t)
   }, [jobs])
 
+  const [retrying, setRetrying] = useState({})  // jobId → true
+
+  const handleRetryKie = async (jobId, e) => {
+    e.stopPropagation()
+    setRetrying(prev => ({ ...prev, [jobId]: true }))
+    try {
+      const res = await fetch(`${API}/generate/retry-kie/${jobId}`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) { alert(data.error || '重试失败'); return }
+      // 本地把这条 job 改为 pending，触发轮询 useEffect 开始追踪
+      setJobs(prev => prev.map(j => j.job_id !== jobId ? j : { ...j, status: 'pending' }))
+      // 清掉详情缓存，展开时会重新拉取最终状态
+      setDetails(prev => { const n = { ...prev }; delete n[jobId]; return n })
+    } catch (err) {
+      alert(err.message)
+    } finally {
+      setRetrying(prev => { const n = { ...prev }; delete n[jobId]; return n })
+    }
+  }
+
   const handleExpand = async (jobId) => {
     if (expanded === jobId) { setExpanded(null); return }
     setExpanded(jobId)
@@ -569,7 +589,16 @@ export default function HistoryView() {
                         </div>
                       )}
                       {detail.job?.error && (
-                        <div style={s.error}>{detail.job.error}</div>
+                        <div style={{ ...s.error, display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                          <span style={{ flex: 1 }}>{detail.job.error}</span>
+                          {detail.job.tasks?.length > 0 && (
+                            <button
+                              disabled={retrying[job.job_id]}
+                              onClick={e => handleRetryKie(job.job_id, e)}
+                              style={{ flexShrink: 0, padding: '3px 10px', borderRadius: 5, border: '1px solid #fca5a5', background: '#fff', color: '#b91c1c', fontSize: 12, fontWeight: 600, cursor: retrying[job.job_id] ? 'not-allowed' : 'pointer' }}
+                            >{retrying[job.job_id] ? '重试中…' : '🔄 重试 kie'}</button>
+                          )}
+                        </div>
                       )}
                     </>
                   )}

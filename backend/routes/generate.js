@@ -419,7 +419,7 @@ router.post('/', upload.fields([
         console.log(`[${jobId}] prompt 已修订（第 ${revisionRound} 次），重新跑程序化校验`)
 
         // 程序化校验：修订后如果还有 critical（如 if/then 没去掉），直接失败，避免再浪费一次评估
-        const reval = validateGeminiOutput(geminiResult, { targetDuration: duration, finalReferenceImageUrls })
+        const reval = validateGeminiOutput(geminiResult, { targetDuration: duration, finalReferenceImageUrls, isFlatLay: isFlatLayEarlyV })
         if (!reval.pass) {
           const c = reval.issues.filter(i => i.severity === 'critical').map(i => `[${i.field}] ${i.problem}`).join('; ')
           throw new Error(`第 ${revisionRound} 次修订后仍未通过程序化校验（说明 Gemini 没正确执行修订指令）：${c}`)
@@ -432,20 +432,19 @@ router.post('/', upload.fields([
       // 插在 prompt 末尾的 --- 之前；如果没有 ---，直接追加
       const rawPrompt = geminiResult.seedance_prompt || ''
 
-      // Color Lock 兜底：根据 Pass 1 选定的 dominant_color 动态生成块，强制 Seedance 锁定单一颜色
       const dominantColor = geminiResult.dominant_color || geminiResult.product_visual_features?.color
+      const features = geminiResult.product_visual_features || {}
+
+      // Color Lock 兜底：根据 Pass 1 选定的 dominant_color 动态生成块，强制 Seedance 锁定单一颜色
       const colorLockBlock = dominantColor
         ? `[COLOR LOCK] Bra is ${dominantColor} in EVERY frame. Reference images of other colors are structure-only — DO NOT render those colors.`
         : ''
 
-      // 产品锚点末尾摘要：把 PRODUCT VISUAL ANCHOR 关键字段在 prompt 末尾再说一次，
-      // 防止长 prompt 中间被淹没（首尾呼应是 LLM/视频模型对长 prompt 最有效的结构）
-      const features = geminiResult.product_visual_features || {}
+      // 产品锚点末尾摘要
       const featuresSummary = features.silhouette || features.color || features.edge_finish ? `[PRODUCT REMINDER — repeat of the visual anchor at top, do NOT ignore]
 The bra in the video has: ${features.silhouette || ''}${features.structure ? ', ' + features.structure : ''}${features.edge_finish ? ', ' + features.edge_finish : ''}${features.fabric_visual ? ', ' + features.fabric_visual : ''}${features.color ? ', color: ' + features.color : ''}.${features.distinguishing_details ? ' Distinguishing: ' + features.distinguishing_details + '.' : ''}` : ''
 
-      // 物理约束末尾锚点：把 CHARACTER / ANATOMICAL / ACTION SAFETY / COLOR 在 prompt 最末尾用一句话再说一次，
-      // 形成首尾呼应。视频模型对长 prompt 的末尾几句通常给予更高 attention 权重。
+      // 物理约束末尾锚点
       const physicalAnchorBlock = `[PHYSICAL ANCHOR — final reminder of the non-negotiable physical rules]
 ONE PERSON across the entire video — same face, hair, makeup, body in every frame. Hands have exactly 5 fingers in natural positions; if a hand cannot render cleanly, keep it out of frame. SURFACE-ONLY contact with the product (no fingers slipping under fabric, no pulling/pinching thin straps). Bra is ${dominantColor || 'the single dominant color'} in EVERY frame. NO mirror-flip transitions.`
 
@@ -455,7 +454,7 @@ ONE PERSON across the entire video — same face, hair, makeup, body in every fr
         ? rawPrompt.slice(0, lastDashIdx) + '\n\n' + allBlocks + '\n' + rawPrompt.slice(lastDashIdx)
         : rawPrompt + '\n\n' + allBlocks
       geminiResult.seedance_prompt = finalPrompt
-      const blockCount = 8 + (dominantColor ? 1 : 0) + (featuresSummary ? 1 : 0) + 1  // 8 mandatory + 可选 COLOR LOCK + 可选 PRODUCT REMINDER + PHYSICAL ANCHOR
+      const blockCount = 8 + (dominantColor ? 1 : 0) + (featuresSummary ? 1 : 0) + 1
       console.log(`[${jobId}] 已注入 ${blockCount} 个块${dominantColor ? `（含 COLOR LOCK = ${dominantColor}）` : ''}，prompt 总长 ${finalPrompt.length} 字符`)
 
       setStep(2, `创建 ${batchCount} 个 Seedance 生成任务`)
@@ -472,6 +471,7 @@ ONE PERSON across the entire video — same face, hair, makeup, body in every fr
 
       job.status = 'pending'
       job.geminiResult = geminiResult
+      job.referenceVideoUrls = referenceVideoUrls   // 持久化，供 retry-kie 复用
       job.tasks = tasks
       setStep(3, 'Seedance 生成中，请耐心等待')
 
@@ -492,6 +492,54 @@ ONE PERSON across the entire video — same face, hair, makeup, body in every fr
     if (!res.headersSent) {
       res.status(500).json({ error: err.message })
     }
+  }
+})
+
+// POST /api/generate/retry-kie/:jobId - 只重建 kie 任务（geminiResult 已有，跳过 Gemini 阶段）
+router.post('/retry-kie/:jobId', async (req, res) => {
+  const { jobId } = req.params
+  let job = global.jobStore?.[jobId]
+  if (!job) {
+    job = getJob(jobId)
+    if (job) { global.jobStore = global.jobStore || {}; global.jobStore[jobId] = job }
+  }
+  if (!job) return res.status(404).json({ error: 'Job not found' })
+  if (!job.geminiResult?.seedance_prompt) return res.status(400).json({ error: '没有 geminiResult，请整体重试' })
+  if (!job.tasks?.length) return res.status(400).json({ error: '没有 kie 任务记录，请整体重试' })
+
+  const referenceImageUrls = (job.geminiResult.selected_images || []).map(s => s.publicUrl).filter(Boolean)
+  const referenceVideoUrls = job.referenceVideoUrls || []
+  const count = job.tasks.length
+
+  // 立即响应，异步重建任务（前端继续轮询同一 jobId）
+  job.status = 'pending'
+  job.error = null
+  job.taskStatuses = []
+  job.videos = []
+  job.step = 3
+  job.stepLabel = `重试 kie — 创建 ${count} 个 Seedance 任务`
+  saveJob(job)
+  res.json({ jobId, status: 'pending' })
+
+  try {
+    const tasks = await createBatchTasks({
+      prompt: job.geminiResult.seedance_prompt,
+      referenceImageUrls,
+      referenceVideoUrls,
+      resolution: job.resolution || '1080x1920',
+      duration: job.duration || '5',
+      aspectRatio: '9:16',
+      count,
+    })
+    console.log(`[${jobId}] ♻️ retry-kie 成功，新任务:`, tasks.map(t => t.taskId))
+    job.tasks = tasks
+    job.stepLabel = 'Seedance 生成中，请耐心等待'
+    saveJob(job)
+  } catch (err) {
+    console.error(`[${jobId}] retry-kie 失败:`, err)
+    job.status = 'failed'
+    job.error = `重试 kie 失败：${err.message}`
+    saveJob(job)
   }
 })
 
@@ -564,6 +612,10 @@ router.get('/status/:jobId', async (req, res) => {
 
     job.videos = videos
 
+    // 关键：先更新到 job 上再 saveJob，否则持久化的 taskStatuses 是上次轮询的旧值
+    // —— 历史上所有失败 job 的 failMsg 都是因此被丢的（taskStatuses 只剩创建快照的 waiting）
+    job.taskStatuses = taskStatuses
+
     const allDone = taskStatuses.every(t =>
       t.state === 'success' || t.state === 'fail'
     )
@@ -571,6 +623,17 @@ router.get('/status/:jobId', async (req, res) => {
       job.status = videos.length > 0 ? 'completed' : 'failed'
       job.completedAt = Date.now()
       if (job.startedAt) job.totalMs = job.completedAt - job.startedAt
+      // 失败时把每个 task 的 failMsg 拼成 error_message，便于历史页一眼看到原因
+      if (videos.length === 0) {
+        const failMsgs = taskStatuses
+          .filter(t => t.state === 'fail' && t.failMsg)
+          .map((t, i) => `[task ${t.taskId?.slice(-8) || i}] ${t.failMsg}`)
+        if (failMsgs.length > 0) {
+          job.error = `Seedance 任务失败：${failMsgs.join(' | ')}`
+        } else if (!job.error) {
+          job.error = 'Seedance 所有任务未产出视频（无 failMsg，可能上游超时被静默吞）'
+        }
+      }
       if (videos.length > 0) {
         console.log(`[${jobId}] ✅ 所有任务完成，视频数: ${videos.length}`)
         videos.forEach(v => console.log(`[${jobId}]    🎬 ${v.videoUrl}`))

@@ -424,6 +424,23 @@ export default function App() {
     setTimeout(() => setCopied(false), 2000)
   }
 
+  const handleRetryKie = async () => {
+    setError(null)
+    setLoading(true)
+    setCurrentStep(3)
+    setJobStatus(prev => prev ? { ...prev, status: 'pending', error: null, tasks: [], videos: [] } : prev)
+    try {
+      const res = await fetch(`${API}/generate/retry-kie/${jobId}`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || '重试失败')
+      startPolling(jobId)
+    } catch (e) {
+      setError(e.message)
+      setLoading(false)
+      setCurrentStep(-1)
+    }
+  }
+
   const fmtTime = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 
   const taskState = jobStatus?.tasks?.[0]?.state
@@ -784,6 +801,12 @@ export default function App() {
           <button style={s.btnPrimary(submitDisabled)} onClick={handleSubmit} disabled={submitDisabled}>
             {loading ? '生成中…' : '🚀 开始生成'}
           </button>
+          {jobStatus?.status === 'failed' && !loading && (jobStatus?.taskCount ?? 0) > 0 && (
+            <button style={{ ...s.btnGhost, background: '#fef2f2', borderColor: '#fca5a5', color: '#b91c1c' }} onClick={handleRetryKie}>🔄 重试 kie</button>
+          )}
+          {jobStatus?.status === 'failed' && !loading && (jobStatus?.taskCount ?? 0) === 0 && (
+            <button style={{ ...s.btnGhost, background: '#fef2f2', borderColor: '#fca5a5', color: '#b91c1c' }} onClick={handleSubmit}>🔄 重试（完整流程）</button>
+          )}
           {(jobId || error) && (
             <button style={s.btnGhost} onClick={reset}>重置</button>
           )}
@@ -848,6 +871,18 @@ export default function App() {
               <span style={s.pill(jobStatus.status)}>
                 {jobStatus.status === 'completed' ? '✅ 完成' : jobStatus.status === 'failed' ? '❌ 失败' : '⏳ 生成中'}
               </span>
+              {jobStatus.status === 'failed' && (jobStatus.taskCount ?? 0) > 0 && (
+                <button
+                  style={{ padding: '3px 12px', borderRadius: 6, border: '1px solid #fca5a5', background: '#fef2f2', color: '#b91c1c', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+                  onClick={handleRetryKie}
+                >🔄 重试 kie</button>
+              )}
+              {jobStatus.status === 'failed' && (jobStatus.taskCount ?? 0) === 0 && (
+                <button
+                  style={{ padding: '3px 12px', borderRadius: 6, border: '1px solid #fca5a5', background: '#fef2f2', color: '#b91c1c', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+                  onClick={handleSubmit}
+                >🔄 重试（完整流程）</button>
+              )}
               <span style={{ marginLeft: 'auto', fontSize: 12, color: '#aaa' }}>{jobId}</span>
             </div>
 
