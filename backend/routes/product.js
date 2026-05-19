@@ -210,7 +210,7 @@ router.get('/fetch', async (req, res) => {
 
   try {
     // 缓存命中：24 小时内同 productId 直接返回（kie.ai URL 也是稳定的）
-    const cached = getProductCache(productId)
+    const cached = await getProductCache(productId)
     if (cached) {
       console.log(`[Product] 缓存命中 ${productId}: ${cached.name}`)
       return res.json({ productId, region, productInfo: cached, cached: true })
@@ -255,7 +255,7 @@ router.get('/fetch', async (req, res) => {
     console.log(`[Product] 稳定 URL 完成：主图 ${productInfo.mainImageUrls.length} + 详情图 ${productInfo.detailImageUrls.length}`)
 
     // 写入产品缓存（下次同 productId 24h 内直接命中），thumb 数组与 url 数组同序
-    try { saveProduct(productId, region, productInfo, { main: mainThumbs, detail: detailThumbs }) }
+    try { await saveProduct(productId, region, productInfo, { main: mainThumbs, detail: detailThumbs }) }
     catch (e) { console.warn(`[Product] 缓存写入失败: ${e.message}`) }
 
     res.json({ productId, region, productInfo })
@@ -278,11 +278,11 @@ router.get('/fetch', async (req, res) => {
 
 // GET /api/product/benchmark-videos?productId=xxx&category=lingerie&limit=10
 // 返回某商品的标杆参考视频列表（按 ROI 降序）
-router.get('/benchmark-videos', (req, res) => {
+router.get('/benchmark-videos', async (req, res) => {
   const { productId, category } = req.query
   const limit = Math.min(parseInt(req.query.limit) || 10, 50)
   try {
-    const videos = listBenchmarkVideos({ productId, category, limit })
+    const videos = await listBenchmarkVideos({ productId, category, limit })
     res.json({ count: videos.length, videos })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -292,11 +292,11 @@ router.get('/benchmark-videos', (req, res) => {
 // ===== 产品管理 API =====
 
 // GET /api/product/list — 列出所有缓存产品（按 last_used_at DESC）
-router.get('/list', (req, res) => {
+router.get('/list', async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 200, 500)
     const offset = parseInt(req.query.offset) || 0
-    const items = listProducts({ limit, offset })
+    const items = await listProducts({ limit, offset })
     res.json({ count: items.length, items })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -305,9 +305,9 @@ router.get('/list', (req, res) => {
 
 // GET /api/product/cache/:productId — 单个产品的完整缓存详情（含 user_image_urls 分开列出）
 // 注意：路径前缀 /cache/ 区分于 /fetch（爬虫）和 /benchmark-videos（标杆）
-router.get('/cache/:productId', (req, res) => {
+router.get('/cache/:productId', async (req, res) => {
   try {
-    const product = getProductFull(req.params.productId)
+    const product = await getProductFull(req.params.productId)
     if (!product) return res.status(404).json({ error: 'Product not cached' })
     res.json({ product })
   } catch (e) {
@@ -319,7 +319,7 @@ router.get('/cache/:productId', (req, res) => {
 // 可选 form field "color"：新上传的图默认绑定到此颜色（否则空串=未标）
 router.post('/:productId/images', upload.array('images', 10), async (req, res) => {
   const { productId } = req.params
-  const product = getProductFull(productId)
+  const product = await getProductFull(productId)
   if (!product) {
     // 清理已上传的临时文件
     for (const f of req.files || []) await unlink(f.path).catch(() => {})
@@ -347,7 +347,7 @@ router.post('/:productId/images', upload.array('images', 10), async (req, res) =
   const newUserImages = [...product.userImageUrls, ...successUrls]
   const newUserColors = [...product.userImageColors, ...successUrls.map(() => uploadColor)]
   const newUserThumbs = [...(product.userImageThumbUrls || []), ...successThumbs]
-  updateProductImages(productId, newUserImages, newUserColors, newUserThumbs)
+  await updateProductImages(productId, newUserImages, newUserColors, newUserThumbs)
   res.json({
     added: successUrls,
     failed: failures,
@@ -358,26 +358,26 @@ router.post('/:productId/images', upload.array('images', 10), async (req, res) =
 })
 
 // PATCH /api/product/:productId/image-color — body: { url, color } 单张图打标
-router.patch('/:productId/image-color', express.json(), (req, res) => {
+router.patch('/:productId/image-color', express.json(), async (req, res) => {
   const { url, color } = req.body
   if (!url) return res.status(400).json({ error: '缺少 url 参数' })
-  const ok = setImageColor(req.params.productId, url, color || '')
+  const ok = await setImageColor(req.params.productId, url, color || '')
   if (!ok) return res.status(404).json({ error: 'URL not found in this product' })
   res.json({ ok: true, url, color: (color || '').trim() })
 })
 
 // POST /api/product/:productId/bulk-tag — body: { urls: [...], color } 批量打标
-router.post('/:productId/bulk-tag', express.json(), (req, res) => {
+router.post('/:productId/bulk-tag', express.json(), async (req, res) => {
   const { urls, color } = req.body
   if (!Array.isArray(urls) || urls.length === 0) return res.status(400).json({ error: '缺少 urls 数组' })
-  const success = bulkSetImageColors(req.params.productId, urls, color || '')
+  const success = await bulkSetImageColors(req.params.productId, urls, color || '')
   res.json({ ok: true, taggedCount: success, total: urls.length })
 })
 
 // GET /api/product/:productId/sku-options — 返回该产品的 SKU 词表（约束 AI 打标）
-router.get('/:productId/sku-options', (req, res) => {
+router.get('/:productId/sku-options', async (req, res) => {
   try {
-    res.json(getProductSkuOptions(req.params.productId))
+    res.json(await getProductSkuOptions(req.params.productId))
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -386,7 +386,7 @@ router.get('/:productId/sku-options', (req, res) => {
 // GET /api/product/:productId/recommend-sku — AI 推荐最适合生成视频的 SKU
 router.get('/:productId/recommend-sku', async (req, res) => {
   try {
-    const product = getProductFull(req.params.productId)
+    const product = await getProductFull(req.params.productId)
     if (!product) return res.status(404).json({ error: 'Product not found' })
     const result = await recommendBestSku(product)
     res.json(result)
@@ -400,11 +400,11 @@ router.get('/:productId/recommend-sku', async (req, res) => {
 router.post('/:productId/ai-detect-colors', express.json(), async (req, res) => {
   const { productId } = req.params
   const scope = req.body?.scope === 'all' ? 'all' : 'untagged'
-  const product = getProductFull(productId)
+  const product = await getProductFull(productId)
   if (!product) return res.status(404).json({ error: 'Product not found' })
 
   // 拿这个产品的 SKU 词表（变体），如果没有就走自由识别老路
-  const skuOptions = getProductSkuOptions(productId)
+  const skuOptions = await getProductSkuOptions(productId)
 
   // 收集待识别的 urls：scope='untagged' 只挑现在没颜色的
   const sections = [
@@ -431,7 +431,7 @@ router.post('/:productId/ai-detect-colors', express.json(), async (req, res) => 
     const failed = []
     for (const r of results) {
       if (r.success && r.color) {
-        if (setImageColor(productId, r.url, r.color)) taggedCount++
+        if (await setImageColor(productId, r.url, r.color)) taggedCount++
       } else {
         failed.push({ url: r.url, error: r.error || 'no color returned' })
       }
@@ -448,11 +448,11 @@ router.post('/:productId/ai-detect-colors', express.json(), async (req, res) => 
 })
 
 // DELETE /api/product/:productId/images — body: { url } 从 user_image_urls 移除指定 URL（同时移除对齐的 color）
-router.delete('/:productId/images', express.json(), (req, res) => {
+router.delete('/:productId/images', express.json(), async (req, res) => {
   const { productId } = req.params
   const { url } = req.body
   if (!url) return res.status(400).json({ error: '缺少 url 参数' })
-  const product = getProductFull(productId)
+  const product = await getProductFull(productId)
   if (!product) return res.status(404).json({ error: 'Product not found' })
 
   const idx = product.userImageUrls.indexOf(url)
@@ -460,22 +460,22 @@ router.delete('/:productId/images', express.json(), (req, res) => {
   const filteredUrls = product.userImageUrls.filter((_, i) => i !== idx)
   const filteredColors = product.userImageColors.filter((_, i) => i !== idx)
   const filteredThumbs = (product.userImageThumbUrls || []).filter((_, i) => i !== idx)
-  updateProductImages(productId, filteredUrls, filteredColors, filteredThumbs)
+  await updateProductImages(productId, filteredUrls, filteredColors, filteredThumbs)
   res.json({ userImageUrls: filteredUrls, userImageColors: filteredColors, userImageThumbUrls: filteredThumbs })
 })
 
 // PATCH /api/product/:productId — body: { name } 重命名
-router.patch('/:productId', express.json(), (req, res) => {
+router.patch('/:productId', express.json(), async (req, res) => {
   const { name } = req.body
   if (!name || typeof name !== 'string') return res.status(400).json({ error: '缺少 name 参数' })
-  const ok = renameProduct(req.params.productId, name.trim())
+  const ok = await renameProduct(req.params.productId, name.trim())
   if (!ok) return res.status(404).json({ error: 'Product not found' })
   res.json({ ok: true, name: name.trim() })
 })
 
 // DELETE /api/product/:productId — 删除整个产品缓存
-router.delete('/:productId', (req, res) => {
-  const ok = deleteProduct(req.params.productId)
+router.delete('/:productId', async (req, res) => {
+  const ok = await deleteProduct(req.params.productId)
   if (!ok) return res.status(404).json({ error: 'Product not found' })
   res.json({ ok: true })
 })

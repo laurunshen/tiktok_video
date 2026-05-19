@@ -1,224 +1,214 @@
-// SQLite 持久化层
+// PostgreSQL 持久化层（AWS RDS）
 // 4 张表：jobs（任务）/ videos（生成的视频）/ products（商品缓存）/ reference_videos（标杆参考视频库）
-// 用 better-sqlite3（同步 API，C 实现，性能强）
+// 用 pg（异步 API）替代 better-sqlite3（同步）
 
-import Database from 'better-sqlite3'
-import path from 'path'
+import pg from 'pg'
+import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
-import { dirname } from 'path'
+import { dirname, join } from 'path'
+
+const { Pool } = pg
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
-const DB_PATH = path.join(__dirname, '..', 'data', 'jobs.db')
 
-const db = new Database(DB_PATH)
-db.pragma('journal_mode = WAL')      // 提升并发读写性能
-db.pragma('foreign_keys = ON')
-
-// ===== 建表 =====
-db.exec(`
-  CREATE TABLE IF NOT EXISTS jobs (
-    job_id TEXT PRIMARY KEY,
-    status TEXT NOT NULL,                -- processing / pending / completed / failed
-    step INTEGER,
-    step_label TEXT,
-
-    product_id TEXT,
-    reference_video_url TEXT,
-    reference_video_author TEXT,
-    category TEXT,                       -- lingerie / general
-    is_same_product INTEGER,
-    duration INTEGER,
-    resolution TEXT,
-    batch_count INTEGER,
-    user_description TEXT,
-    variant_seed INTEGER,                -- 1-5 = 同一标杆的裂变配方编号；NULL = 未指定
-
-    -- 时间统计（毫秒）
-    created_at INTEGER NOT NULL,
-    started_at INTEGER,
-    completed_at INTEGER,
-    gemini_pass1_ms INTEGER,
-    gemini_pass2_ms INTEGER,
-    gemini_review_ms INTEGER,
-    seedance_ms INTEGER,
-    total_ms INTEGER,
-
-    error_message TEXT,
-
-    -- 完整 job 数据 JSON（保留旧 jobStore 的所有字段方便迁移）
-    full_data TEXT
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-  CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
-  CREATE INDEX IF NOT EXISTS idx_jobs_product_id ON jobs(product_id);
-
-  CREATE TABLE IF NOT EXISTS videos (
-    video_id TEXT PRIMARY KEY,           -- Seedance taskId
-    job_id TEXT,
-    video_url TEXT,
-    prompt TEXT,                         -- 实际发给 Seedance 的完整 prompt
-    compressed_script TEXT,
-
-    product_visual_features TEXT,        -- JSON
-    selected_image_indices TEXT,         -- JSON array
-    selected_image_urls TEXT,            -- JSON array
-    dominant_color TEXT,
-
-    review_score INTEGER,
-    review_pass INTEGER,                 -- 0/1
-    review_issues TEXT,                  -- JSON
-    revision_count INTEGER DEFAULT 0,
-
-    -- 用户反馈（前端实现后填）
-    user_rating INTEGER,                 -- 1-5
-    user_feedback TEXT,
-    is_published INTEGER DEFAULT 0,
-    tiktok_video_id TEXT,                -- 发布到 TikTok 后的视频 ID
-
-    -- 投流数据（人工或脚本导入）
-    ad_impressions INTEGER,
-    ad_clicks INTEGER,
-    ad_conversions INTEGER,
-    ad_spend REAL,
-    ad_revenue REAL,
-    ctr REAL,
-    cvr REAL,
-    roas REAL,
-    completion_rate REAL,
-    ad_data_imported_at INTEGER,
-
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (job_id) REFERENCES jobs(job_id)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_videos_job_id ON videos(job_id);
-  CREATE INDEX IF NOT EXISTS idx_videos_roas ON videos(roas);
-
-  CREATE TABLE IF NOT EXISTS products (
-    product_id TEXT PRIMARY KEY,
-    name TEXT,
-    region TEXT,
-    product_info TEXT,                   -- 完整 productInfo JSON
-    main_image_urls TEXT,                -- JSON array
-    detail_image_urls TEXT,              -- JSON array
-    first_seen_at INTEGER NOT NULL,
-    last_used_at INTEGER NOT NULL,
-    job_count INTEGER DEFAULT 0
-  );
-
-  CREATE TABLE IF NOT EXISTS reference_videos (
-    -- 标杆参考视频库（投流数据 + 联盟数据导入而成）
-    video_id TEXT PRIMARY KEY,           -- TikTok video_id
-    video_url TEXT NOT NULL,
-    author_username TEXT,
-    title TEXT,
-
-    product_id TEXT,                     -- 关联到具体 SKU（可空）
-    product_name TEXT,
-    category TEXT,                       -- lingerie / general / ...
-
-    -- 投流表现指标
-    roi REAL,                            -- ROI
-    revenue REAL,                        -- 总收入
-    cost REAL,                           -- 投放成本
-    cvr REAL,                            -- 广告转化率
-    play_2s_rate REAL,                   -- 2 秒播放率
-    play_6s_rate REAL,                   -- 6 秒播放率（completion proxy）
-    impressions INTEGER,                 -- 曝光
-    clicks INTEGER,
-    ctr REAL,
-
-    -- 联盟数据
-    affiliate_gmv REAL,
-    affiliate_likes INTEGER,
-    affiliate_comments INTEGER,
-
-    source TEXT,                         -- 'ad' | 'affiliate' | 'manual'
-    is_benchmark INTEGER DEFAULT 0,     -- 是否被标记为"标杆"（推荐给用户作参考视频）
-    benchmark_reason TEXT,               -- 标记理由
-
-    imported_at INTEGER NOT NULL,
-    raw_data TEXT                        -- 原始数据 JSON（备份）
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_refvids_product_id ON reference_videos(product_id);
-  CREATE INDEX IF NOT EXISTS idx_refvids_roi ON reference_videos(roi);
-  CREATE INDEX IF NOT EXISTS idx_refvids_benchmark ON reference_videos(is_benchmark);
-`)
-
-// 平滑升级：旧库可能没有新字段，加上忽略错误
-try { db.exec('ALTER TABLE jobs ADD COLUMN variant_seed INTEGER') } catch {}
-// 视频后评分（Gemini 看完生成视频后给出的多维度评分）
-try { db.exec('ALTER TABLE videos ADD COLUMN video_judge_overall REAL') } catch {}
-try { db.exec('ALTER TABLE videos ADD COLUMN video_judge_scores TEXT') } catch {}    // JSON of per-dim scores
-try { db.exec('ALTER TABLE videos ADD COLUMN video_judge_issues TEXT') } catch {}    // JSON array
-try { db.exec('ALTER TABLE videos ADD COLUMN video_judge_verdict TEXT') } catch {}
-try { db.exec('ALTER TABLE videos ADD COLUMN diff_judge_overall REAL') } catch {}    // 与标杆视频的差异化评分
-try { db.exec('ALTER TABLE videos ADD COLUMN diff_judge_scores TEXT') } catch {}
-try { db.exec('ALTER TABLE videos ADD COLUMN diff_judge_verdict TEXT') } catch {}
-try { db.exec('ALTER TABLE videos ADD COLUMN narrative_dna TEXT') } catch {}        // Pass 1 提取的 narrative_dna JSON
-try { db.exec('ALTER TABLE videos ADD COLUMN poster_url TEXT') } catch {}            // 首帧缩略图 JPG（历史页轻量预览，省 100× 流量）
-try { db.exec('ALTER TABLE products ADD COLUMN user_image_urls TEXT') } catch {}    // 用户手动上传的稳定 kie.ai 图 URL（JSON array）
-try { db.exec('ALTER TABLE products ADD COLUMN is_curated INTEGER DEFAULT 0') } catch {}  // 1 = 用户已加图，缓存不再 24h 过期
-try { db.exec('ALTER TABLE products ADD COLUMN main_image_colors TEXT') } catch {}   // 与 main_image_urls 同序的 color JSON array，空串=未标
-try { db.exec('ALTER TABLE products ADD COLUMN detail_image_colors TEXT') } catch {} // 同上，对应 detail_image_urls
-try { db.exec('ALTER TABLE products ADD COLUMN user_image_colors TEXT') } catch {}   // 同上，对应 user_image_urls
-// 与 *_image_urls 同序的 400px thumbnail URL（JSON array）。null/缺失 = 走原图 fallback
-try { db.exec('ALTER TABLE products ADD COLUMN main_image_thumb_urls TEXT') } catch {}
-try { db.exec('ALTER TABLE products ADD COLUMN detail_image_thumb_urls TEXT') } catch {}
-try { db.exec('ALTER TABLE products ADD COLUMN user_image_thumb_urls TEXT') } catch {}
-
-console.log(`[DB] SQLite 已初始化: ${DB_PATH}`)
-
-// 启动时清理僵尸 job：
-//  - status='processing'（Pass1/2/评估/修订阶段）= 纯 in-process 状态，重启后无人接管 → 标 failed
-//  - status='pending'（已进 Seedance 队列）= kie.ai 远端任务还在跑，job.tasks[].taskId 已持久化在 full_data，
-//    /status 轮询会自动 getJob→重新轮询 kie.ai 恢复 → 保留，不要杀
+// SSL 证书（AWS RDS 要求）
+let sslConfig
 try {
-  const zombieResult = db.prepare(`UPDATE jobs SET
-    status = 'failed',
-    error_message = COALESCE(error_message, 'backend 重启时进程被杀，job 未恢复（zombie cleanup on boot）')
-    WHERE status = 'processing'
-  `).run()
-  if (zombieResult.changes > 0) {
-    console.log(`[DB] 清理 ${zombieResult.changes} 条僵尸 job（status=processing，重启后不可恢复）`)
+  const certPath = join(__dirname, '..', 'global-bundle.pem')
+  sslConfig = { ca: readFileSync(certPath).toString(), rejectUnauthorized: true }
+} catch {
+  // cert 文件缺失时 fallback（本地开发不走 RDS 的情况）
+  sslConfig = { rejectUnauthorized: false }
+}
+
+export const pool = new Pool({
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT) || 5432,
+  database: process.env.DB_NAME || 'postgres',
+  user: process.env.DB_USER || 'postgres',
+  password: process.env.DB_PASSWORD,
+  ssl: sslConfig,
+  max: 10,             // 最大连接数
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+})
+
+pool.on('error', (err) => {
+  console.error('[DB] pg pool error:', err.message)
+})
+
+// ===== 初始化（建表 + 迁移 + 清僵尸）=====
+// server.js 启动时 await initDb()
+export async function initDb() {
+  const client = await pool.connect()
+  try {
+    // --- jobs 表 ---
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS jobs (
+        job_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        step INTEGER,
+        step_label TEXT,
+        product_id TEXT,
+        reference_video_url TEXT,
+        reference_video_author TEXT,
+        category TEXT,
+        is_same_product INTEGER,
+        duration INTEGER,
+        resolution TEXT,
+        batch_count INTEGER,
+        user_description TEXT,
+        variant_seed INTEGER,
+        created_at BIGINT NOT NULL,
+        started_at BIGINT,
+        completed_at BIGINT,
+        gemini_pass1_ms INTEGER,
+        gemini_pass2_ms INTEGER,
+        gemini_review_ms INTEGER,
+        seedance_ms INTEGER,
+        total_ms INTEGER,
+        error_message TEXT,
+        full_data TEXT
+      )
+    `)
+    await client.query('CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)')
+    await client.query('CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at)')
+    await client.query('CREATE INDEX IF NOT EXISTS idx_jobs_product_id ON jobs(product_id)')
+
+    // --- videos 表 ---
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS videos (
+        video_id TEXT PRIMARY KEY,
+        job_id TEXT,
+        video_url TEXT,
+        prompt TEXT,
+        compressed_script TEXT,
+        product_visual_features TEXT,
+        selected_image_indices TEXT,
+        selected_image_urls TEXT,
+        dominant_color TEXT,
+        review_score INTEGER,
+        review_pass INTEGER,
+        review_issues TEXT,
+        revision_count INTEGER DEFAULT 0,
+        user_rating INTEGER,
+        user_feedback TEXT,
+        is_published INTEGER DEFAULT 0,
+        tiktok_video_id TEXT,
+        ad_impressions INTEGER,
+        ad_clicks INTEGER,
+        ad_conversions INTEGER,
+        ad_spend DOUBLE PRECISION,
+        ad_revenue DOUBLE PRECISION,
+        ctr DOUBLE PRECISION,
+        cvr DOUBLE PRECISION,
+        roas DOUBLE PRECISION,
+        completion_rate DOUBLE PRECISION,
+        ad_data_imported_at BIGINT,
+        created_at BIGINT NOT NULL
+      )
+    `)
+    await client.query('CREATE INDEX IF NOT EXISTS idx_videos_job_id ON videos(job_id)')
+    await client.query('CREATE INDEX IF NOT EXISTS idx_videos_roas ON videos(roas)')
+
+    // --- products 表 ---
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS products (
+        product_id TEXT PRIMARY KEY,
+        name TEXT,
+        region TEXT,
+        product_info TEXT,
+        main_image_urls TEXT,
+        detail_image_urls TEXT,
+        first_seen_at BIGINT NOT NULL,
+        last_used_at BIGINT NOT NULL,
+        job_count INTEGER DEFAULT 0
+      )
+    `)
+
+    // --- reference_videos 表 ---
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS reference_videos (
+        video_id TEXT PRIMARY KEY,
+        video_url TEXT NOT NULL,
+        author_username TEXT,
+        title TEXT,
+        product_id TEXT,
+        product_name TEXT,
+        category TEXT,
+        roi DOUBLE PRECISION,
+        revenue DOUBLE PRECISION,
+        cost DOUBLE PRECISION,
+        cvr DOUBLE PRECISION,
+        play_2s_rate DOUBLE PRECISION,
+        play_6s_rate DOUBLE PRECISION,
+        impressions INTEGER,
+        clicks INTEGER,
+        ctr DOUBLE PRECISION,
+        affiliate_gmv DOUBLE PRECISION,
+        affiliate_likes INTEGER,
+        affiliate_comments INTEGER,
+        source TEXT,
+        is_benchmark INTEGER DEFAULT 0,
+        benchmark_reason TEXT,
+        imported_at BIGINT NOT NULL,
+        raw_data TEXT
+      )
+    `)
+    await client.query('CREATE INDEX IF NOT EXISTS idx_refvids_product_id ON reference_videos(product_id)')
+    await client.query('CREATE INDEX IF NOT EXISTS idx_refvids_roi ON reference_videos(roi)')
+    await client.query('CREATE INDEX IF NOT EXISTS idx_refvids_benchmark ON reference_videos(is_benchmark)')
+
+    // --- 平滑升级：新列 ---
+    const addCol = async (table, col, type) => {
+      try { await client.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${type}`) } catch {}
+    }
+    await addCol('jobs', 'variant_seed', 'INTEGER')
+    await addCol('videos', 'video_judge_overall', 'DOUBLE PRECISION')
+    await addCol('videos', 'video_judge_scores', 'TEXT')
+    await addCol('videos', 'video_judge_issues', 'TEXT')
+    await addCol('videos', 'video_judge_verdict', 'TEXT')
+    await addCol('videos', 'diff_judge_overall', 'DOUBLE PRECISION')
+    await addCol('videos', 'diff_judge_scores', 'TEXT')
+    await addCol('videos', 'diff_judge_verdict', 'TEXT')
+    await addCol('videos', 'narrative_dna', 'TEXT')
+    await addCol('videos', 'poster_url', 'TEXT')
+    await addCol('products', 'user_image_urls', 'TEXT')
+    await addCol('products', 'is_curated', 'INTEGER DEFAULT 0')
+    await addCol('products', 'main_image_colors', 'TEXT')
+    await addCol('products', 'detail_image_colors', 'TEXT')
+    await addCol('products', 'user_image_colors', 'TEXT')
+    await addCol('products', 'main_image_thumb_urls', 'TEXT')
+    await addCol('products', 'detail_image_thumb_urls', 'TEXT')
+    await addCol('products', 'user_image_thumb_urls', 'TEXT')
+
+    // --- 清理僵尸 job（重启时 processing 状态 = 进程被杀，无人接管） ---
+    const zombie = await client.query(`
+      UPDATE jobs SET
+        status = 'failed',
+        error_message = COALESCE(error_message, 'backend 重启时进程被杀，job 未恢复（zombie cleanup on boot）')
+      WHERE status = 'processing'
+    `)
+    if (zombie.rowCount > 0) {
+      console.log(`[DB] 清理 ${zombie.rowCount} 条僵尸 job（status=processing）`)
+    }
+    const pending = await client.query(`SELECT COUNT(*) AS c FROM jobs WHERE status = 'pending'`)
+    const pendingCount = parseInt(pending.rows[0].c, 10)
+    if (pendingCount > 0) {
+      console.log(`[DB] 保留 ${pendingCount} 条 pending job（Seedance 远端仍在跑，/status 轮询会自动接管）`)
+    }
+
+    console.log('[DB] PostgreSQL 已初始化（AWS RDS）')
+  } finally {
+    client.release()
   }
-  const pendingCount = db.prepare(`SELECT COUNT(*) AS c FROM jobs WHERE status = 'pending'`).get().c
-  if (pendingCount > 0) {
-    console.log(`[DB] 保留 ${pendingCount} 条 pending job（Seedance 远端仍在跑，/status 轮询会自动接管）`)
-  }
-} catch (e) {
-  console.warn(`[DB] 僵尸 job 清理失败（不阻塞启动）: ${e.message}`)
 }
 
 // ===== Job 操作 =====
 
-/**
- * 用 INSERT OR REPLACE 整体写入/更新 job
- * @param {Object} job - 完整 job 对象（兼容旧 jobStore 结构）
- */
-export function saveJob(job) {
-  const stmt = db.prepare(`
-    INSERT OR REPLACE INTO jobs (
-      job_id, status, step, step_label,
-      product_id, reference_video_url, reference_video_author, category,
-      is_same_product, duration, resolution, batch_count, user_description, variant_seed,
-      created_at, started_at, completed_at,
-      gemini_pass1_ms, gemini_pass2_ms, gemini_review_ms, seedance_ms, total_ms,
-      error_message, full_data
-    ) VALUES (
-      @job_id, @status, @step, @step_label,
-      @product_id, @reference_video_url, @reference_video_author, @category,
-      @is_same_product, @duration, @resolution, @batch_count, @user_description, @variant_seed,
-      @created_at, @started_at, @completed_at,
-      @gemini_pass1_ms, @gemini_pass2_ms, @gemini_review_ms, @seedance_ms, @total_ms,
-      @error_message, @full_data
-    )
-  `)
-
-  stmt.run({
+export async function saveJob(job) {
+  const vals = {
     job_id: job.jobId,
     status: job.status || 'processing',
     step: job.step ?? null,
@@ -243,25 +233,59 @@ export function saveJob(job) {
     total_ms: job.totalMs ?? null,
     error_message: job.error ?? null,
     full_data: JSON.stringify(job),
-  })
+  }
+
+  await pool.query(`
+    INSERT INTO jobs (
+      job_id, status, step, step_label,
+      product_id, reference_video_url, reference_video_author, category,
+      is_same_product, duration, resolution, batch_count, user_description, variant_seed,
+      created_at, started_at, completed_at,
+      gemini_pass1_ms, gemini_pass2_ms, gemini_review_ms, seedance_ms, total_ms,
+      error_message, full_data
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+      $15,$16,$17,$18,$19,$20,$21,$22,$23,$24
+    )
+    ON CONFLICT (job_id) DO UPDATE SET
+      status=$2, step=$3, step_label=$4,
+      product_id=$5, reference_video_url=$6, reference_video_author=$7, category=$8,
+      is_same_product=$9, duration=$10, resolution=$11, batch_count=$12,
+      user_description=$13, variant_seed=$14,
+      created_at=$15, started_at=$16, completed_at=$17,
+      gemini_pass1_ms=$18, gemini_pass2_ms=$19, gemini_review_ms=$20,
+      seedance_ms=$21, total_ms=$22,
+      error_message=$23, full_data=$24
+  `, [
+    vals.job_id, vals.status, vals.step, vals.step_label,
+    vals.product_id, vals.reference_video_url, vals.reference_video_author, vals.category,
+    vals.is_same_product, vals.duration, vals.resolution, vals.batch_count,
+    vals.user_description, vals.variant_seed,
+    vals.created_at, vals.started_at, vals.completed_at,
+    vals.gemini_pass1_ms, vals.gemini_pass2_ms, vals.gemini_review_ms,
+    vals.seedance_ms, vals.total_ms,
+    vals.error_message, vals.full_data,
+  ])
 }
 
-export function getJob(jobId) {
-  const row = db.prepare('SELECT full_data FROM jobs WHERE job_id = ?').get(jobId)
-  return row ? JSON.parse(row.full_data) : null
+export async function getJob(jobId) {
+  const { rows } = await pool.query('SELECT full_data FROM jobs WHERE job_id = $1', [jobId])
+  return rows[0] ? JSON.parse(rows[0].full_data) : null
 }
 
-export function listJobs({ limit = 50, offset = 0, status = null, sortBy = 'time', published = false, unpublished = false, productId = null } = {}) {
+export async function listJobs({ limit = 50, offset = 0, status = null, sortBy = 'time', published = false, unpublished = false, productId = null } = {}) {
   const baseCols = 'j.job_id, j.status, j.step_label, j.product_id, j.category, j.created_at, j.completed_at, j.total_ms, j.error_message'
   const params = []
+  let pi = 0
+  const np = (v) => { params.push(v); return `$${++pi}` }
+
   const needJoin = sortBy === 'quality'
   let query = `SELECT ${needJoin ? `${baseCols}, MAX(v.video_judge_overall) AS _max_score` : baseCols} FROM jobs j`
   if (needJoin) query += ' LEFT JOIN videos v ON v.job_id = j.job_id'
   const wheres = []
-  if (status) { wheres.push('j.status = ?'); params.push(status) }
-  if (productId) { wheres.push('j.product_id = ?'); params.push(productId) }
+  if (status) wheres.push(`j.status = ${np(status)}`)
+  if (productId) wheres.push(`j.product_id = ${np(productId)}`)
   if (published) wheres.push('EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = j.job_id AND vp.is_published = 1)')
-  // unpublished = 至少有一个视频 + 没有任何已发布的视频（"完成了但没发"的语义）
   if (unpublished) {
     wheres.push('EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = j.job_id)')
     wheres.push('NOT EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = j.job_id AND vp.is_published = 1)')
@@ -273,16 +297,18 @@ export function listJobs({ limit = 50, offset = 0, status = null, sortBy = 'time
   } else {
     query += ' ORDER BY j.created_at DESC'
   }
-  query += ' LIMIT ? OFFSET ?'
-  params.push(limit, offset)
-  return db.prepare(query).all(...params)
+  query += ` LIMIT ${np(limit)} OFFSET ${np(offset)}`
+  const { rows } = await pool.query(query, params)
+  return rows
 }
 
-export function countJobs(status = null, published = false, unpublished = false, productId = null) {
+export async function countJobs(status = null, published = false, unpublished = false, productId = null) {
   const params = []
+  let pi = 0
+  const np = (v) => { params.push(v); return `$${++pi}` }
   const wheres = []
-  if (status) { wheres.push('status = ?'); params.push(status) }
-  if (productId) { wheres.push('product_id = ?'); params.push(productId) }
+  if (status) wheres.push(`status = ${np(status)}`)
+  if (productId) wheres.push(`product_id = ${np(productId)}`)
   if (published) wheres.push('EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = jobs.job_id AND vp.is_published = 1)')
   if (unpublished) {
     wheres.push('EXISTS (SELECT 1 FROM videos vp WHERE vp.job_id = jobs.job_id)')
@@ -290,162 +316,109 @@ export function countJobs(status = null, published = false, unpublished = false,
   }
   let q = 'SELECT COUNT(*) AS c FROM jobs'
   if (wheres.length) q += ' WHERE ' + wheres.join(' AND ')
-  return db.prepare(q).get(...params).c
+  const { rows } = await pool.query(q, params)
+  return parseInt(rows[0].c, 10)
 }
 
-// 按 product_id 聚合 job 数，供历史页下拉显示"每产品 N 条"
-export function countJobsByProduct() {
-  return db.prepare(
+export async function countJobsByProduct() {
+  const { rows } = await pool.query(
     'SELECT product_id, COUNT(*) AS c FROM jobs WHERE product_id IS NOT NULL GROUP BY product_id'
-  ).all()
+  )
+  return rows
 }
 
 // ===== Video 操作 =====
 
-export function saveVideo(video) {
-  const stmt = db.prepare(`
-    INSERT OR REPLACE INTO videos (
+export async function saveVideo(video) {
+  await pool.query(`
+    INSERT INTO videos (
       video_id, job_id, video_url, poster_url, prompt, compressed_script,
       product_visual_features, selected_image_indices, selected_image_urls, dominant_color,
       review_score, review_pass, review_issues, revision_count,
-      narrative_dna,
-      created_at
-    ) VALUES (
-      @video_id, @job_id, @video_url, @poster_url, @prompt, @compressed_script,
-      @product_visual_features, @selected_image_indices, @selected_image_urls, @dominant_color,
-      @review_score, @review_pass, @review_issues, @revision_count,
-      @narrative_dna,
-      @created_at
-    )
-  `)
-
-  stmt.run({
-    video_id: video.videoId,
-    job_id: video.jobId,
-    video_url: video.videoUrl ?? null,
-    poster_url: video.posterUrl ?? null,
-    prompt: video.prompt ?? null,
-    compressed_script: video.compressedScript ?? null,
-    product_visual_features: video.productVisualFeatures ? JSON.stringify(video.productVisualFeatures) : null,
-    selected_image_indices: video.selectedImageIndices ? JSON.stringify(video.selectedImageIndices) : null,
-    selected_image_urls: video.selectedImageUrls ? JSON.stringify(video.selectedImageUrls) : null,
-    dominant_color: video.dominantColor ?? null,
-    review_score: video.reviewScore ?? null,
-    review_pass: video.reviewPass == null ? null : (video.reviewPass ? 1 : 0),
-    review_issues: video.reviewIssues ? JSON.stringify(video.reviewIssues) : null,
-    revision_count: video.revisionCount ?? 0,
-    narrative_dna: video.narrativeDna ? JSON.stringify(video.narrativeDna) : null,
-    created_at: Date.now(),
-  })
+      narrative_dna, created_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+    ON CONFLICT (video_id) DO UPDATE SET
+      job_id=$2, video_url=$3, poster_url=$4, prompt=$5, compressed_script=$6,
+      product_visual_features=$7, selected_image_indices=$8, selected_image_urls=$9, dominant_color=$10,
+      review_score=$11, review_pass=$12, review_issues=$13, revision_count=$14,
+      narrative_dna=$15
+  `, [
+    video.videoId,
+    video.jobId,
+    video.videoUrl ?? null,
+    video.posterUrl ?? null,
+    video.prompt ?? null,
+    video.compressedScript ?? null,
+    video.productVisualFeatures ? JSON.stringify(video.productVisualFeatures) : null,
+    video.selectedImageIndices ? JSON.stringify(video.selectedImageIndices) : null,
+    video.selectedImageUrls ? JSON.stringify(video.selectedImageUrls) : null,
+    video.dominantColor ?? null,
+    video.reviewScore ?? null,
+    video.reviewPass == null ? null : (video.reviewPass ? 1 : 0),
+    video.reviewIssues ? JSON.stringify(video.reviewIssues) : null,
+    video.revisionCount ?? 0,
+    video.narrativeDna ? JSON.stringify(video.narrativeDna) : null,
+    Date.now(),
+  ])
 }
 
-// 更新 poster_url（backfill / 后置生成场景）
-export function updateVideoPosterUrl(videoId, posterUrl) {
-  return db.prepare('UPDATE videos SET poster_url = ? WHERE video_id = ?').run(posterUrl, videoId).changes > 0
+export async function updateVideoPosterUrl(videoId, posterUrl) {
+  const { rowCount } = await pool.query(
+    'UPDATE videos SET poster_url = $1 WHERE video_id = $2',
+    [posterUrl, videoId]
+  )
+  return rowCount > 0
 }
 
-// 视频生成完成后，更新 video judge 评分（异步调用 Gemini 后写入）
-// reference_match_notes 合并进 scores JSON 一起持久化（避免新加 DB 列）
-export function updateVideoJudge(videoId, judge) {
+export async function updateVideoJudge(videoId, judge) {
   if (!judge) return
   const scoresWithExtras = judge.scores ? {
     ...judge.scores,
     ...(judge.reference_match_notes ? { reference_match_notes: judge.reference_match_notes } : {}),
     ...(judge.what_worked ? { what_worked: judge.what_worked } : {}),
   } : null
-  db.prepare(`UPDATE videos SET
-    video_judge_overall = ?, video_judge_scores = ?, video_judge_issues = ?, video_judge_verdict = ?
-    WHERE video_id = ?`).run(
+  await pool.query(`
+    UPDATE videos SET
+      video_judge_overall=$1, video_judge_scores=$2, video_judge_issues=$3, video_judge_verdict=$4
+    WHERE video_id=$5
+  `, [
     judge.overall ?? null,
     scoresWithExtras ? JSON.stringify(scoresWithExtras) : null,
     judge.top_issues ? JSON.stringify(judge.top_issues) : null,
     judge.verdict ?? null,
     videoId,
-  )
+  ])
 }
 
-// 与标杆视频的差异化评分
-export function updateVideoDiffJudge(videoId, diffJudge) {
+export async function updateVideoDiffJudge(videoId, diffJudge) {
   if (!diffJudge) return
-  db.prepare(`UPDATE videos SET
-    diff_judge_overall = ?, diff_judge_scores = ?, diff_judge_verdict = ?
-    WHERE video_id = ?`).run(
+  await pool.query(`
+    UPDATE videos SET
+      diff_judge_overall=$1, diff_judge_scores=$2, diff_judge_verdict=$3
+    WHERE video_id=$4
+  `, [
     diffJudge.overall_differentiation ?? null,
     diffJudge.scores ? JSON.stringify(diffJudge.scores) : null,
     diffJudge.verdict ?? null,
     videoId,
+  ])
+}
+
+export async function getVideo(videoId) {
+  const { rows } = await pool.query('SELECT * FROM videos WHERE video_id = $1', [videoId])
+  return rows[0] || null
+}
+
+export async function getVideosByJob(jobId) {
+  const { rows } = await pool.query(
+    'SELECT * FROM videos WHERE job_id = $1 ORDER BY created_at',
+    [jobId]
   )
-}
-
-// 直接读取一条视频（含所有 judge 字段）
-export function getVideo(videoId) {
-  return db.prepare('SELECT * FROM videos WHERE video_id = ?').get(videoId)
-}
-
-// 读一个 job 的所有 videos
-export function getVideosByJob(jobId) {
-  return db.prepare('SELECT * FROM videos WHERE job_id = ? ORDER BY created_at').all(jobId)
+  return rows
 }
 
 // ===== Product 缓存 =====
 
-// thumbUrls 可选：{ main: string[], detail: string[] }，未传则只写 *_image_urls，thumb 列保持原值
-export function saveProduct(productId, region, productInfo, thumbUrls = null) {
-  const now = Date.now()
-  const exists = db.prepare('SELECT 1 FROM products WHERE product_id = ?').get(productId)
-  const mainThumbsJson = thumbUrls?.main ? JSON.stringify(thumbUrls.main) : null
-  const detailThumbsJson = thumbUrls?.detail ? JSON.stringify(thumbUrls.detail) : null
-  if (exists) {
-    // UPDATE：只在 thumbUrls 提供时才覆盖对应 thumb 列（避免清空老数据）
-    if (thumbUrls) {
-      db.prepare(`
-        UPDATE products SET
-          product_info = ?, main_image_urls = ?, detail_image_urls = ?,
-          main_image_thumb_urls = ?, detail_image_thumb_urls = ?,
-          last_used_at = ?, job_count = job_count + 1
-        WHERE product_id = ?
-      `).run(
-        JSON.stringify(productInfo),
-        JSON.stringify(productInfo.mainImageUrls || []),
-        JSON.stringify(productInfo.detailImageUrls || []),
-        mainThumbsJson, detailThumbsJson,
-        now, productId,
-      )
-    } else {
-      db.prepare(`
-        UPDATE products SET
-          product_info = ?, main_image_urls = ?, detail_image_urls = ?,
-          last_used_at = ?, job_count = job_count + 1
-        WHERE product_id = ?
-      `).run(
-        JSON.stringify(productInfo),
-        JSON.stringify(productInfo.mainImageUrls || []),
-        JSON.stringify(productInfo.detailImageUrls || []),
-        now, productId,
-      )
-    }
-  } else {
-    db.prepare(`
-      INSERT INTO products (
-        product_id, name, region, product_info,
-        main_image_urls, detail_image_urls,
-        main_image_thumb_urls, detail_image_thumb_urls,
-        first_seen_at, last_used_at, job_count
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      productId,
-      productInfo.name || null,
-      region || null,
-      JSON.stringify(productInfo),
-      JSON.stringify(productInfo.mainImageUrls || []),
-      JSON.stringify(productInfo.detailImageUrls || []),
-      mainThumbsJson, detailThumbsJson,
-      now, now, 1,
-    )
-  }
-}
-
-// 把一个 url 数组按 colorFilter 过滤，保留 colors 中匹配的索引位置（case-insensitive）
 function filterUrlsByColor(urls, colors, colorFilter) {
   if (!colorFilter) return urls
   const target = String(colorFilter).trim().toLowerCase()
@@ -457,7 +430,6 @@ function filterUrlsByColor(urls, colors, colorFilter) {
   return result
 }
 
-// 把 urls 数组和 colors 数组对齐（如果 colors 比 urls 短，用空串补齐；长则截断）
 function alignColors(urls, colors) {
   const out = new Array(urls.length).fill('')
   if (!Array.isArray(colors)) return out
@@ -467,15 +439,81 @@ function alignColors(urls, colors) {
   return out
 }
 
-export function getProductCache(productId, maxAgeMs = 24 * 3600 * 1000, colorFilter = null) {
-  const row = db.prepare(`
+function alignThumbs(urls, thumbs) {
+  const out = new Array(urls.length).fill('')
+  if (!Array.isArray(thumbs)) return out
+  for (let i = 0; i < urls.length && i < thumbs.length; i++) {
+    out[i] = thumbs[i] || ''
+  }
+  return out
+}
+
+export async function saveProduct(productId, region, productInfo, thumbUrls = null) {
+  const now = Date.now()
+  const { rows } = await pool.query('SELECT 1 FROM products WHERE product_id = $1', [productId])
+  const exists = rows.length > 0
+  const mainThumbsJson = thumbUrls?.main ? JSON.stringify(thumbUrls.main) : null
+  const detailThumbsJson = thumbUrls?.detail ? JSON.stringify(thumbUrls.detail) : null
+
+  if (exists) {
+    if (thumbUrls) {
+      await pool.query(`
+        UPDATE products SET
+          product_info=$1, main_image_urls=$2, detail_image_urls=$3,
+          main_image_thumb_urls=$4, detail_image_thumb_urls=$5,
+          last_used_at=$6, job_count=job_count+1
+        WHERE product_id=$7
+      `, [
+        JSON.stringify(productInfo),
+        JSON.stringify(productInfo.mainImageUrls || []),
+        JSON.stringify(productInfo.detailImageUrls || []),
+        mainThumbsJson, detailThumbsJson,
+        now, productId,
+      ])
+    } else {
+      await pool.query(`
+        UPDATE products SET
+          product_info=$1, main_image_urls=$2, detail_image_urls=$3,
+          last_used_at=$4, job_count=job_count+1
+        WHERE product_id=$5
+      `, [
+        JSON.stringify(productInfo),
+        JSON.stringify(productInfo.mainImageUrls || []),
+        JSON.stringify(productInfo.detailImageUrls || []),
+        now, productId,
+      ])
+    }
+  } else {
+    await pool.query(`
+      INSERT INTO products (
+        product_id, name, region, product_info,
+        main_image_urls, detail_image_urls,
+        main_image_thumb_urls, detail_image_thumb_urls,
+        first_seen_at, last_used_at, job_count
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+    `, [
+      productId,
+      productInfo.name || null,
+      region || null,
+      JSON.stringify(productInfo),
+      JSON.stringify(productInfo.mainImageUrls || []),
+      JSON.stringify(productInfo.detailImageUrls || []),
+      mainThumbsJson, detailThumbsJson,
+      now, now, 1,
+    ])
+  }
+}
+
+export async function getProductCache(productId, maxAgeMs = 24 * 3600 * 1000, colorFilter = null) {
+  const { rows } = await pool.query(`
     SELECT product_info, last_used_at, main_image_urls, detail_image_urls, user_image_urls,
            main_image_colors, detail_image_colors, user_image_colors, is_curated
-    FROM products WHERE product_id = ?
-  `).get(productId)
+    FROM products WHERE product_id = $1
+  `, [productId])
+  const row = rows[0]
   if (!row) return null
-  // curated 产品（用户已加图）不再过期；其他走 24h 检查
-  if (!row.is_curated && Date.now() - row.last_used_at > maxAgeMs) return null
+  if (!row.is_curated && Date.now() - Number(row.last_used_at) > maxAgeMs) return null
+
   const productInfo = JSON.parse(row.product_info)
   const mainUrls = row.main_image_urls ? JSON.parse(row.main_image_urls) : []
   const detailUrls = row.detail_image_urls ? JSON.parse(row.detail_image_urls) : []
@@ -484,14 +522,12 @@ export function getProductCache(productId, maxAgeMs = 24 * 3600 * 1000, colorFil
   const detailColors = alignColors(detailUrls, row.detail_image_colors ? JSON.parse(row.detail_image_colors) : [])
   const userColors = alignColors(userUrls, row.user_image_colors ? JSON.parse(row.user_image_colors) : [])
 
-  // colorFilter 模式：覆盖 productInfo 里的 url 数组，只留匹配色的图（user 图并入 detail 池）
   if (colorFilter) {
     productInfo.mainImageUrls = filterUrlsByColor(mainUrls, mainColors, colorFilter)
     const filteredDetail = filterUrlsByColor(detailUrls, detailColors, colorFilter)
     const filteredUser = filterUrlsByColor(userUrls, userColors, colorFilter)
     productInfo.detailImageUrls = [...filteredDetail, ...filteredUser]
   } else {
-    // 不过滤：保留 productInfo 自身的 url 数组（与原行为一致），把用户图合并进 detail
     if (userUrls.length > 0) {
       productInfo.detailImageUrls = [...(productInfo.detailImageUrls || []), ...userUrls]
     }
@@ -499,7 +535,6 @@ export function getProductCache(productId, maxAgeMs = 24 * 3600 * 1000, colorFil
   return productInfo
 }
 
-// 把 colors 数组算成 {color: count, '': untaggedCount}
 function summarizeColors(...colorArrays) {
   const counts = {}
   for (const arr of colorArrays) {
@@ -511,17 +546,17 @@ function summarizeColors(...colorArrays) {
   return counts
 }
 
-// 列出所有缓存产品（管理页用）。按 last_used_at DESC 排
-export function listProducts({ limit = 200, offset = 0 } = {}) {
-  const rows = db.prepare(`
+export async function listProducts({ limit = 200, offset = 0 } = {}) {
+  const { rows } = await pool.query(`
     SELECT product_id, name, region, main_image_urls, detail_image_urls, user_image_urls,
            main_image_colors, detail_image_colors, user_image_colors,
            main_image_thumb_urls, detail_image_thumb_urls, user_image_thumb_urls,
            is_curated, job_count, first_seen_at, last_used_at
     FROM products
     ORDER BY last_used_at DESC
-    LIMIT ? OFFSET ?
-  `).all(limit, offset)
+    LIMIT $1 OFFSET $2
+  `, [limit, offset])
+
   return rows.map(r => {
     const main = r.main_image_urls ? JSON.parse(r.main_image_urls) : []
     const detail = r.detail_image_urls ? JSON.parse(r.detail_image_urls) : []
@@ -532,7 +567,6 @@ export function listProducts({ limit = 200, offset = 0 } = {}) {
     const mainColors = alignColors(main, r.main_image_colors ? JSON.parse(r.main_image_colors) : [])
     const detailColors = alignColors(detail, r.detail_image_colors ? JSON.parse(r.detail_image_colors) : [])
     const userColors = alignColors(user, r.user_image_colors ? JSON.parse(r.user_image_colors) : [])
-    // 列表封面优先用 thumb（轻量），backfill 前 fallback 到原图
     const coverThumb = mainThumbs[0] || detailThumbs[0] || userThumbs[0] || null
     return {
       productId: r.product_id,
@@ -545,31 +579,21 @@ export function listProducts({ limit = 200, offset = 0 } = {}) {
       colorCounts: summarizeColors(mainColors, detailColors, userColors),
       isCurated: !!r.is_curated,
       jobCount: r.job_count,
-      firstSeenAt: r.first_seen_at,
-      lastUsedAt: r.last_used_at,
+      firstSeenAt: Number(r.first_seen_at),
+      lastUsedAt: Number(r.last_used_at),
     }
   })
 }
 
-// 取单个产品的完整信息（管理页详情用，user_image_urls 单独返回不合并）
-// thumb URL 数组与对应 url 数组同序对齐；缺失的位置为空串，前端 fallback 到原图
-function alignThumbs(urls, thumbs) {
-  const out = new Array(urls.length).fill('')
-  if (!Array.isArray(thumbs)) return out
-  for (let i = 0; i < urls.length && i < thumbs.length; i++) {
-    out[i] = thumbs[i] || ''
-  }
-  return out
-}
-
-export function getProductFull(productId) {
-  const row = db.prepare(`
+export async function getProductFull(productId) {
+  const { rows } = await pool.query(`
     SELECT product_id, name, region, product_info, main_image_urls, detail_image_urls,
            user_image_urls, main_image_colors, detail_image_colors, user_image_colors,
            main_image_thumb_urls, detail_image_thumb_urls, user_image_thumb_urls,
            is_curated, job_count, first_seen_at, last_used_at
-    FROM products WHERE product_id = ?
-  `).get(productId)
+    FROM products WHERE product_id = $1
+  `, [productId])
+  const row = rows[0]
   if (!row) return null
   const mainUrls = row.main_image_urls ? JSON.parse(row.main_image_urls) : []
   const detailUrls = row.detail_image_urls ? JSON.parse(row.detail_image_urls) : []
@@ -590,36 +614,31 @@ export function getProductFull(productId) {
     userImageThumbUrls: alignThumbs(userUrls, row.user_image_thumb_urls ? JSON.parse(row.user_image_thumb_urls) : []),
     isCurated: !!row.is_curated,
     jobCount: row.job_count,
-    firstSeenAt: row.first_seen_at,
-    lastUsedAt: row.last_used_at,
+    firstSeenAt: Number(row.first_seen_at),
+    lastUsedAt: Number(row.last_used_at),
   }
 }
 
-// 整体覆写 user_image_urls + user_image_colors + user_image_thumb_urls（保持对齐），自动 is_curated=1
-// userImageThumbUrls: 可选，长度需对齐 userImageUrls；缺失用空串补齐（前端 fallback 到原图）
-export function updateProductImages(productId, userImageUrls, userImageColors = null, userImageThumbUrls = null) {
+export async function updateProductImages(productId, userImageUrls, userImageColors = null, userImageThumbUrls = null) {
   const urls = userImageUrls || []
   const colors = alignColors(urls, userImageColors || [])
   const thumbs = alignThumbs(urls, userImageThumbUrls || [])
-  const result = db.prepare(`
+  const { rowCount } = await pool.query(`
     UPDATE products SET
-      user_image_urls = ?, user_image_colors = ?, user_image_thumb_urls = ?,
-      is_curated = 1, last_used_at = ?
-    WHERE product_id = ?
-  `).run(
-    JSON.stringify(urls), JSON.stringify(colors), JSON.stringify(thumbs),
-    Date.now(), productId,
-  )
-  return result.changes > 0
+      user_image_urls=$1, user_image_colors=$2, user_image_thumb_urls=$3,
+      is_curated=1, last_used_at=$4
+    WHERE product_id=$5
+  `, [JSON.stringify(urls), JSON.stringify(colors), JSON.stringify(thumbs), Date.now(), productId])
+  return rowCount > 0
 }
 
-// 找单张图所在的 (section, index)，section ∈ {'main','detail','user'}
-// 返回 null 表示没找到
-function findImageLocation(productId, url) {
-  const row = db.prepare(
-    'SELECT main_image_urls, detail_image_urls, user_image_urls FROM products WHERE product_id = ?'
-  ).get(productId)
-  if (!row) return null
+async function findImageLocation(productId, url) {
+  const { rows } = await pool.query(
+    'SELECT main_image_urls, detail_image_urls, user_image_urls FROM products WHERE product_id = $1',
+    [productId]
+  )
+  if (!rows[0]) return null
+  const row = rows[0]
   const sections = [
     { name: 'main', urls: row.main_image_urls ? JSON.parse(row.main_image_urls) : [] },
     { name: 'detail', urls: row.detail_image_urls ? JSON.parse(row.detail_image_urls) : [] },
@@ -632,55 +651,56 @@ function findImageLocation(productId, url) {
   return null
 }
 
-// 设置某张图的颜色（自动定位在 main/detail/user 哪个数组）。返回是否成功
-export function setImageColor(productId, url, color) {
-  const loc = findImageLocation(productId, url)
+export async function setImageColor(productId, url, color) {
+  const loc = await findImageLocation(productId, url)
   if (!loc) return false
   const colorCol = `${loc.section}_image_colors`
-  const row = db.prepare(`SELECT ${colorCol} as c FROM products WHERE product_id = ?`).get(productId)
-  const colors = alignColors(loc.urls, row.c ? JSON.parse(row.c) : [])
+  const { rows } = await pool.query(`SELECT ${colorCol} AS c FROM products WHERE product_id = $1`, [productId])
+  const colors = alignColors(loc.urls, rows[0]?.c ? JSON.parse(rows[0].c) : [])
   colors[loc.index] = String(color || '').trim()
-  db.prepare(`UPDATE products SET ${colorCol} = ?, last_used_at = ? WHERE product_id = ?`)
-    .run(JSON.stringify(colors), Date.now(), productId)
+  await pool.query(
+    `UPDATE products SET ${colorCol}=$1, last_used_at=$2 WHERE product_id=$3`,
+    [JSON.stringify(colors), Date.now(), productId]
+  )
   return true
 }
 
-// 批量打标：把所有传入 url 的颜色都设成同一个值。返回成功数
-export function bulkSetImageColors(productId, urls, color) {
+export async function bulkSetImageColors(productId, urls, color) {
   let success = 0
   for (const url of urls || []) {
-    if (setImageColor(productId, url, color)) success++
+    if (await setImageColor(productId, url, color)) success++
   }
   return success
 }
 
-export function renameProduct(productId, newName) {
-  const result = db.prepare('UPDATE products SET name = ? WHERE product_id = ?').run(newName, productId)
-  return result.changes > 0
+export async function renameProduct(productId, newName) {
+  const { rowCount } = await pool.query(
+    'UPDATE products SET name=$1 WHERE product_id=$2',
+    [newName, productId]
+  )
+  return rowCount > 0
 }
 
-// 更新某条视频的 video_url（migration / S3 替换 kie URL 用）
-export function updateVideoUrl(videoId, newUrl) {
-  const result = db.prepare('UPDATE videos SET video_url = ? WHERE video_id = ?').run(newUrl, videoId)
-  return result.changes > 0
+export async function updateVideoUrl(videoId, newUrl) {
+  const { rowCount } = await pool.query(
+    'UPDATE videos SET video_url=$1 WHERE video_id=$2',
+    [newUrl, videoId]
+  )
+  return rowCount > 0
 }
 
-// 标记某条视频已发布到 TikTok。tiktokVideoId 可为空（仅标记 is_published）
-export function markVideoPublished(videoId, tiktokVideoId, isPublished = true) {
-  const result = db.prepare(`UPDATE videos SET
-    is_published = ?, tiktok_video_id = ?
-    WHERE video_id = ?
-  `).run(isPublished ? 1 : 0, tiktokVideoId || null, videoId)
-  return result.changes > 0
+export async function markVideoPublished(videoId, tiktokVideoId, isPublished = true) {
+  const { rowCount } = await pool.query(`
+    UPDATE videos SET is_published=$1, tiktok_video_id=$2 WHERE video_id=$3
+  `, [isPublished ? 1 : 0, tiktokVideoId || null, videoId])
+  return rowCount > 0
 }
 
-// 从产品的 product_info JSON 拿到 SKU 选项词表（用于约束 AI 打标）
-// 默认取 variants 第一轴（一般是 Color）。返回 { axis, values }，没有 variants 时 values=[]
-export function getProductSkuOptions(productId) {
-  const row = db.prepare('SELECT product_info FROM products WHERE product_id = ?').get(productId)
-  if (!row || !row.product_info) return { axis: null, values: [] }
+export async function getProductSkuOptions(productId) {
+  const { rows } = await pool.query('SELECT product_info FROM products WHERE product_id = $1', [productId])
+  if (!rows[0] || !rows[0].product_info) return { axis: null, values: [] }
   try {
-    const info = JSON.parse(row.product_info)
+    const info = JSON.parse(rows[0].product_info)
     const first = (info.variants || [])[0]
     if (!first || !Array.isArray(first.values)) return { axis: null, values: [] }
     return { axis: first.name || null, values: first.values.filter(v => v && typeof v === 'string') }
@@ -689,17 +709,16 @@ export function getProductSkuOptions(productId) {
   }
 }
 
-export function deleteProduct(productId) {
-  const result = db.prepare('DELETE FROM products WHERE product_id = ?').run(productId)
-  return result.changes > 0
+export async function deleteProduct(productId) {
+  const { rowCount } = await pool.query('DELETE FROM products WHERE product_id = $1', [productId])
+  return rowCount > 0
 }
 
-// ===== Reference Video（标杆参考视频库）操作 =====
+// ===== Reference Video 操作 =====
 
-export function saveReferenceVideo(refVideo) {
-  // Merge 策略：如果 video_id 已存在，只更新本次提供的非空字段
-  // 这样广告数据和联盟数据可以叠加（广告先导入 → 联盟补充联盟字段，不覆盖 product_id/ROI 等）
-  const existing = db.prepare('SELECT * FROM reference_videos WHERE video_id = ?').get(refVideo.video_id)
+export async function saveReferenceVideo(refVideo) {
+  const { rows } = await pool.query('SELECT * FROM reference_videos WHERE video_id = $1', [refVideo.video_id])
+  const existing = rows[0]
 
   const finalData = existing ? {
     video_id: refVideo.video_id,
@@ -709,27 +728,23 @@ export function saveReferenceVideo(refVideo) {
     product_id: refVideo.product_id ?? existing.product_id,
     product_name: refVideo.product_name ?? existing.product_name,
     category: refVideo.category ?? existing.category,
-    // 广告指标：优先保留已有值（广告先导入），否则用新值
     roi: existing.roi ?? refVideo.roi ?? null,
     revenue: existing.revenue ?? refVideo.revenue ?? null,
     cost: existing.cost ?? refVideo.cost ?? null,
     cvr: existing.cvr ?? refVideo.cvr ?? null,
     play_2s_rate: existing.play_2s_rate ?? refVideo.play_2s_rate ?? null,
     play_6s_rate: existing.play_6s_rate ?? refVideo.play_6s_rate ?? null,
-    impressions: refVideo.impressions ?? existing.impressions ?? null,  // 联盟曝光数也有效，取新的
+    impressions: refVideo.impressions ?? existing.impressions ?? null,
     clicks: refVideo.clicks ?? existing.clicks ?? null,
     ctr: refVideo.ctr ?? existing.ctr ?? null,
-    // 联盟字段：以新值优先（联盟数据后导入）
     affiliate_gmv: refVideo.affiliate_gmv ?? existing.affiliate_gmv ?? null,
     affiliate_likes: refVideo.affiliate_likes ?? existing.affiliate_likes ?? null,
     affiliate_comments: refVideo.affiliate_comments ?? existing.affiliate_comments ?? null,
-    // source: 标记为 both
     source: existing.source === refVideo.source ? existing.source : 'both',
-    // is_benchmark: 任一来源是 benchmark 就标 1
     is_benchmark: (existing.is_benchmark || refVideo.is_benchmark) ? 1 : 0,
     benchmark_reason: [existing.benchmark_reason, refVideo.benchmark_reason].filter(Boolean).join(' | ') || null,
     imported_at: Date.now(),
-    raw_data: existing.raw_data,  // 保留首次导入的 raw_data
+    raw_data: existing.raw_data,
   } : {
     video_id: refVideo.video_id,
     video_url: refVideo.video_url,
@@ -757,8 +772,9 @@ export function saveReferenceVideo(refVideo) {
     raw_data: refVideo.raw_data ? JSON.stringify(refVideo.raw_data) : null,
   }
 
-  const stmt = db.prepare(`
-    INSERT OR REPLACE INTO reference_videos (
+  const d = finalData
+  await pool.query(`
+    INSERT INTO reference_videos (
       video_id, video_url, author_username, title,
       product_id, product_name, category,
       roi, revenue, cost, cvr, play_2s_rate, play_6s_rate,
@@ -766,45 +782,47 @@ export function saveReferenceVideo(refVideo) {
       affiliate_gmv, affiliate_likes, affiliate_comments,
       source, is_benchmark, benchmark_reason,
       imported_at, raw_data
-    ) VALUES (
-      @video_id, @video_url, @author_username, @title,
-      @product_id, @product_name, @category,
-      @roi, @revenue, @cost, @cvr, @play_2s_rate, @play_6s_rate,
-      @impressions, @clicks, @ctr,
-      @affiliate_gmv, @affiliate_likes, @affiliate_comments,
-      @source, @is_benchmark, @benchmark_reason,
-      @imported_at, @raw_data
-    )
-  `)
-  stmt.run(finalData)
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+    ON CONFLICT (video_id) DO UPDATE SET
+      video_url=$2, author_username=$3, title=$4,
+      product_id=$5, product_name=$6, category=$7,
+      roi=$8, revenue=$9, cost=$10, cvr=$11, play_2s_rate=$12, play_6s_rate=$13,
+      impressions=$14, clicks=$15, ctr=$16,
+      affiliate_gmv=$17, affiliate_likes=$18, affiliate_comments=$19,
+      source=$20, is_benchmark=$21, benchmark_reason=$22,
+      imported_at=$23, raw_data=$24
+  `, [
+    d.video_id, d.video_url, d.author_username, d.title,
+    d.product_id, d.product_name, d.category,
+    d.roi, d.revenue, d.cost, d.cvr, d.play_2s_rate, d.play_6s_rate,
+    d.impressions, d.clicks, d.ctr,
+    d.affiliate_gmv, d.affiliate_likes, d.affiliate_comments,
+    d.source, d.is_benchmark, d.benchmark_reason,
+    d.imported_at, d.raw_data,
+  ])
 }
 
-/**
- * 查询某个商品的标杆参考视频（按 ROI 降序）
- */
-export function listBenchmarkVideos({ productId = null, category = null, limit = 10 } = {}) {
-  let query = 'SELECT * FROM reference_videos WHERE is_benchmark = 1'
+export async function listBenchmarkVideos({ productId = null, category = null, limit = 10 } = {}) {
   const params = []
-  if (productId) {
-    query += ' AND product_id = ?'
-    params.push(productId)
-  }
-  if (category) {
-    query += ' AND category = ?'
-    params.push(category)
-  }
-  query += ' ORDER BY roi DESC LIMIT ?'
-  params.push(limit)
-  return db.prepare(query).all(...params)
+  let pi = 0
+  const np = (v) => { params.push(v); return `$${++pi}` }
+  let query = 'SELECT * FROM reference_videos WHERE is_benchmark = 1'
+  if (productId) query += ` AND product_id = ${np(productId)}`
+  if (category) query += ` AND category = ${np(category)}`
+  query += ` ORDER BY roi DESC LIMIT ${np(limit)}`
+  const { rows } = await pool.query(query, params)
+  return rows
 }
 
-// 自动清理 30 天前的失败任务（避免数据库无限膨胀）
-export function pruneOldFailedJobs(daysAgo = 30) {
+export async function pruneOldFailedJobs(daysAgo = 30) {
   const cutoff = Date.now() - daysAgo * 24 * 3600 * 1000
-  const result = db.prepare("DELETE FROM jobs WHERE status = 'failed' AND created_at < ?").run(cutoff)
-  if (result.changes > 0) {
-    console.log(`[DB] 清理了 ${result.changes} 条 ${daysAgo} 天前的失败任务`)
+  const { rowCount } = await pool.query(
+    "DELETE FROM jobs WHERE status = 'failed' AND created_at < $1",
+    [cutoff]
+  )
+  if (rowCount > 0) {
+    console.log(`[DB] 清理了 ${rowCount} 条 ${daysAgo} 天前的失败任务`)
   }
 }
 
-export default db
+export default pool

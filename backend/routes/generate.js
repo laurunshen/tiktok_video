@@ -224,7 +224,7 @@ router.post('/', upload.fields([
       category, isSameProduct, duration, resolution,
       batchCount, userDescription, variantSeed,
     }
-    saveJob(global.jobStore[jobId])
+    saveJob(global.jobStore[jobId]).catch(e => console.warn('[DB] saveJob error:', e.message))
 
     res.json({ jobId, status: 'processing', message: 'Job started successfully' })
 
@@ -233,7 +233,7 @@ router.post('/', upload.fields([
       job.step = step
       job.stepLabel = label
       console.log(`[${jobId}] Step ${step}: ${label}`)
-      saveJob(job)
+      saveJob(job).catch(e => console.warn('[DB] setStep error:', e.message))
     }
 
     // --- Async processing pipeline ---
@@ -249,7 +249,7 @@ router.post('/', upload.fields([
         console.log(`[${jobId}] Snaptik 解析成功: ${resolvedVideoUrl}`)
         // 把直链存到 job 上，供后续 diff_judge 使用（Gemini 下不动 TikTok 原链）
         job.resolvedReferenceVideoUrl = resolvedVideoUrl
-        saveJob(job)
+        saveJob(job).catch(e => console.warn('[DB] saveJob error:', e.message))
       }
 
       // Step 0b: 上传产品图到 S3（只有用户手动上传了图片才需要；URL 持久不过期）
@@ -419,7 +419,7 @@ router.post('/', upload.fields([
         console.log(`[${jobId}] prompt 已修订（第 ${revisionRound} 次），重新跑程序化校验`)
 
         // 程序化校验：修订后如果还有 critical（如 if/then 没去掉），直接失败，避免再浪费一次评估
-        const reval = validateGeminiOutput(geminiResult, { targetDuration: duration, finalReferenceImageUrls, isFlatLay: isFlatLayEarlyV })
+        const reval = validateGeminiOutput(geminiResult, { targetDuration: duration, finalReferenceImageUrls })
         if (!reval.pass) {
           const c = reval.issues.filter(i => i.severity === 'critical').map(i => `[${i.field}] ${i.problem}`).join('; ')
           throw new Error(`第 ${revisionRound} 次修订后仍未通过程序化校验（说明 Gemini 没正确执行修订指令）：${c}`)
@@ -479,7 +479,7 @@ ONE PERSON across the entire video — same face, hair, makeup, body in every fr
       console.error(`[${jobId}] Pipeline error:`, err)
       job.status = 'failed'
       job.error = err.message
-      saveJob(job)
+      saveJob(job).catch(e => console.warn('[DB] saveJob error:', e.message))
     } finally {
       await cleanupFiles(allFiles)
       // 精准清理本任务用过的图片缓存（不影响并发任务）
@@ -500,7 +500,7 @@ router.post('/retry-kie/:jobId', async (req, res) => {
   const { jobId } = req.params
   let job = global.jobStore?.[jobId]
   if (!job) {
-    job = getJob(jobId)
+    job = await getJob(jobId)
     if (job) { global.jobStore = global.jobStore || {}; global.jobStore[jobId] = job }
   }
   if (!job) return res.status(404).json({ error: 'Job not found' })
@@ -518,7 +518,7 @@ router.post('/retry-kie/:jobId', async (req, res) => {
   job.videos = []
   job.step = 3
   job.stepLabel = `重试 kie — 创建 ${count} 个 Seedance 任务`
-  saveJob(job)
+  saveJob(job).catch(e => console.warn('[DB] saveJob error:', e.message))
   res.json({ jobId, status: 'pending' })
 
   try {
@@ -534,12 +534,12 @@ router.post('/retry-kie/:jobId', async (req, res) => {
     console.log(`[${jobId}] ♻️ retry-kie 成功，新任务:`, tasks.map(t => t.taskId))
     job.tasks = tasks
     job.stepLabel = 'Seedance 生成中，请耐心等待'
-    saveJob(job)
+    saveJob(job).catch(e => console.warn('[DB] saveJob error:', e.message))
   } catch (err) {
     console.error(`[${jobId}] retry-kie 失败:`, err)
     job.status = 'failed'
     job.error = `重试 kie 失败：${err.message}`
-    saveJob(job)
+    saveJob(job).catch(e => console.warn('[DB] saveJob error:', e.message))
   }
 })
 
@@ -549,7 +549,7 @@ router.get('/status/:jobId', async (req, res) => {
   // 双层查找：内存（热数据）→ SQLite（持久化）
   let job = global.jobStore?.[jobId]
   if (!job) {
-    job = getJob(jobId)
+    job = await getJob(jobId)
     if (job) {
       // 从 DB 恢复到内存（这样接下来的轮询又能用热数据）
       global.jobStore = global.jobStore || {}
@@ -640,7 +640,7 @@ router.get('/status/:jobId', async (req, res) => {
         // 把每条生成的视频写到 videos 表（便于后续投流数据导入和分析）
         for (const v of videos) {
           try {
-            saveVideo({
+            await saveVideo({
               videoId: v.taskId,
               jobId: job.jobId,
               videoUrl: v.videoUrl,
@@ -673,7 +673,7 @@ router.get('/status/:jobId', async (req, res) => {
                 referenceImageUrls: job.geminiResult?.selected_image_urls || [],
               })
               if (judge) {
-                updateVideoJudge(v.taskId, judge)
+                await updateVideoJudge(v.taskId, judge)
                 console.log(`[${jobId}] ✅ 视频评分完成：${judge.overall}/10 — ${judge.verdict}`)
               }
               // 如果有标杆参考视频，再做差异化评分
@@ -687,7 +687,7 @@ router.get('/status/:jobId', async (req, res) => {
                     benchmarkVideoUrl: benchmarkUrl,
                   })
                   if (diff) {
-                    updateVideoDiffJudge(v.taskId, diff)
+                    await updateVideoDiffJudge(v.taskId, diff)
                     console.log(`[${jobId}] ✅ 差异化评分：${diff.overall_differentiation}/10 — ${diff.verdict}`)
                   }
                 } catch (e) {
@@ -702,7 +702,7 @@ router.get('/status/:jobId', async (req, res) => {
       } else {
         console.error(`[${jobId}] ❌ 所有任务均失败`)
       }
-      saveJob(job)  // 完成时持久化最终状态
+      saveJob(job).catch(e => console.warn('[DB] saveJob error:', e.message))  // 完成时持久化最终状态
     }
 
     job.taskStatuses = taskStatuses
@@ -743,7 +743,7 @@ router.get('/variants', (req, res) => {
 
 // GET /api/generate/jobs?limit=50&offset=0&status=completed&productId=xxx - 历史任务列表
 // 每条 job 附带：videos 简要（taskId / video_url / 评分）便于历史页直接展示
-router.get('/jobs', (req, res) => {
+router.get('/jobs', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 50, 200)
   const offset = parseInt(req.query.offset) || 0
   const rawStatus = req.query.status || null
@@ -754,11 +754,11 @@ router.get('/jobs', (req, res) => {
   const sortBy = req.query.sortBy === 'quality' ? 'quality' : 'time'
   const productId = req.query.productId || null
   try {
-    const jobs = listJobs({ limit, offset, status, sortBy, published, unpublished, productId })
-    const total = countJobs(status, published, unpublished, productId)
+    const jobs = await listJobs({ limit, offset, status, sortBy, published, unpublished, productId })
+    const total = await countJobs(status, published, unpublished, productId)
     // 补 videos 摘要
-    const enriched = jobs.map(j => {
-      const vids = getVideosByJob(j.job_id) || []
+    const enriched = await Promise.all(jobs.map(async j => {
+      const vids = await getVideosByJob(j.job_id) || []
       return {
         ...j,
         videos: vids.map(v => ({
@@ -772,7 +772,7 @@ router.get('/jobs', (req, res) => {
           tiktokVideoId: v.tiktok_video_id,
         })),
       }
-    })
+    }))
     res.json({ total, limit, offset, jobs: enriched })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -781,11 +781,11 @@ router.get('/jobs', (req, res) => {
 
 // GET /api/generate/job-product-counts — 按 product_id 聚合 job 数（历史页下拉显示用）
 // 返回 { counts: { <product_id>: <count> } }；未关联产品的 job 不计入
-router.get('/job-product-counts', (req, res) => {
+router.get('/job-product-counts', async (req, res) => {
   try {
-    const rows = countJobsByProduct()
+    const rows = await countJobsByProduct()
     const counts = {}
-    for (const r of rows) counts[r.product_id] = r.c
+    for (const r of rows) counts[r.product_id] = parseInt(r.c, 10)
     res.json({ counts })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -795,7 +795,7 @@ router.get('/job-product-counts', (req, res) => {
 // PATCH /api/generate/videos/:videoId/published — 标记某条视频已发布到 TikTok
 // body: { tiktokInput: <URL 或 纯 video_id> | null, isPublished?: boolean }
 // 若传 tiktokInput，自动从 URL 提取数字 id；若 isPublished 缺省则按是否有 input 决定
-router.patch('/videos/:videoId/published', express.json(), (req, res) => {
+router.patch('/videos/:videoId/published', express.json(), async (req, res) => {
   const { videoId } = req.params
   const { tiktokInput, isPublished } = req.body
   let tiktokVideoId = null
@@ -812,17 +812,17 @@ router.patch('/videos/:videoId/published', express.json(), (req, res) => {
     }
   }
   const flag = isPublished == null ? (tiktokVideoId != null) : !!isPublished
-  const ok = markVideoPublished(videoId, tiktokVideoId, flag)
+  const ok = await markVideoPublished(videoId, tiktokVideoId, flag)
   if (!ok) return res.status(404).json({ error: 'Video not found' })
   res.json({ ok: true, videoId, tiktokVideoId, isPublished: flag })
 })
 
 // GET /api/generate/jobs/:jobId - 单条 job 完整详情（含 videos + prompt + 全评分）
-router.get('/jobs/:jobId', (req, res) => {
+router.get('/jobs/:jobId', async (req, res) => {
   try {
-    const job = getJob(req.params.jobId)
+    const job = await getJob(req.params.jobId)
     if (!job) return res.status(404).json({ error: 'Job not found' })
-    const videos = getVideosByJob(req.params.jobId) || []
+    const videos = await getVideosByJob(req.params.jobId) || []
     res.json({
       job,
       videos: videos.map(v => ({

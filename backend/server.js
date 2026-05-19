@@ -25,12 +25,16 @@ import { mkdir } from 'fs/promises'
 import generateRouter from './routes/generate.js'
 import callbackRouter from './routes/callback.js'
 import productRouter from './routes/product.js'
+import { initDb } from './services/db.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
 
 // Ensure uploads dir exists
 await mkdir('./uploads', { recursive: true })
+
+// 初始化数据库（建表 + 迁移 + 清僵尸 job）
+await initDb()
 
 app.use(cors({ origin: 'http://localhost:5173' }))
 app.use(express.json())
