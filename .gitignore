@@ -28,6 +28,9 @@ backend/logs/
 *.swp
 *.swo
 
+# Claude Code
+.claude/
+
 # Misc shell brace-expansion accident
 {backend/
 
