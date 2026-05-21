@@ -686,7 +686,6 @@ export default function App() {
             )}
           </div>
 
-          {!beforeAfterMode && (
           <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 13, color: '#555' }}>参考视频是否为本产品的带货视频？</span>
             <div style={{ display: 'flex', gap: 0, borderRadius: 7, overflow: 'hidden', border: '1px solid #ddd' }}>
@@ -708,7 +707,6 @@ export default function App() {
               {isSameProduct ? '✅ 脚本直接从视频台词压缩，产品信息作补充' : '🔄 仅学说话风格，台词从产品信息重新生成'}
             </span>
           </div>
-          )}
 
           {/* 标杆参考视频库（仅当该产品有真实投流数据时显示） */}
           {benchmarkVideos.length > 0 && (

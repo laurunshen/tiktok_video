@@ -71,18 +71,15 @@ Phase 7: 异步评分（video_judge 8 维 + diff_judge 差异化）
 |---|---|---|---|---|
 | **① normal + 同产品** | 参考视频 shot_sequence | 参考视频原台词逐字压缩 | 参考视频 | ✅ |
 | **② normal + 不同产品** | 参考 shot_sequence 骨架（时长/字数分布保留） | 按产品信息+概念全新写；参考台词被节奏模板抹掉（防泄漏） | 参考视频 | ✅ |
-| **③ before-after + 同产品** | — 不单独存在，塌缩为 ④ | — | — | 见说明 |
-| **④ before-after** | 固定：0:00-0:02 快切 hook + 0:02 后过渡 + 其余跟参考 shot_sequence | 全新写（产品信息+选中卖点+概念） | 参考视频 narrative_dna | ✅ |
+| **③ before-after + 同产品** | 0:00-0:02 快切 hook + 0:02 后过渡 + 其余跟参考 shot_sequence | 参考视频真实台词压缩（跳过 hook 已讲的卖点） | 参考视频 | ✅ |
+| **④ before-after + 不同产品** | 同 ③ | 全新写（产品信息+选中卖点+概念）；参考台词节奏模板防泄漏 | 参考视频 narrative_dna | ✅ |
 
 **规律**：
-- 结构 → normal 跟参考视频；before-after 前 2 秒固定，之后跟参考
+- 结构 → normal 全程跟参考视频；before-after 前 2 秒固定 hook，0:02 之后跟参考视频
 - 风格/节奏 → 四个都来自参考视频
 - 台词内容 → 只由 isSameProduct 决定（同产品=用真实台词，不同产品=全新写）
 
-**before-after 模式的关键约定**：
-- 前端勾选 before-after 时**隐藏 isSameProduct 开关**；后端**强制 isSameProduct=false**（台词一律全新生成，顺带白嫖防泄漏 sanitization）
-- 情景 ③ 不单独实现 —— before-after 结构固定、台词围绕卖点重排，同产品的参考台词无法逐字复用，③ 自动塌缩为 ④
-- 真要复刻自己产品的旧 before-after 视频 → 用 normal 模式 + isSameProduct=true（情景 ①）
+**关键点**：before-after 的 0:02 之后就是 normal 流程，所以 isSameProduct 在两个模式下**完全同义**。before-after 模式照常暴露 isSameProduct 开关，四宫格是完整的 4 格。
 
 **before-after 模板细节**（`deriveBeforeAfterTemplate`，基于 task3Lingerie 衍生，task3Lingerie 本体不动）：
 - 0:00-0:02：强制 LOOK A / LOOK B 每半秒快切 hook；LOOK B 用最刚性产品描述
@@ -133,8 +130,7 @@ Phase 7: 异步评分（video_judge 8 维 + diff_judge 差异化）
 | Pass 1 temperature=0 | 保证 shot_sequence 可复现，variant 只变 presenter |
 | shot_sequence 直接驱动（方案 D）| 替代废弃的 10 模板表（信息损失 90%）|
 | before-after 走独立衍生模板 | 不污染 task3Lingerie；mode 门控，普通任务零影响 |
-| before-after 强制 isSameProduct=false | 结构固定 → 同产品台词无法逐字复用，③ 塌缩为 ④ |
-| 参考视频在 before-after 中降级为「风格供体」| 结构由模板定，参考只贡献 narrative_dna + 视觉切片 |
+| before-after 保留 isSameProduct 开关 | 0:02 后就是 normal 流程，开关同义；四宫格完整 4 格 |
 | 全链路 Gemini 重试 | 一次瞬时 502 不再整个 job 失败 |
 | 不换视频模型 | Seedance 2 是唯一支持参考图的 image-to-video+audio 模型 |
 

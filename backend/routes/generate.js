@@ -169,9 +169,9 @@ router.post('/', upload.fields([
     const category = req.body.category || 'general'
     const productInfo = req.body.productInfo ? JSON.parse(req.body.productInfo) : null
     const mode = req.body.mode === 'before-after' ? 'before-after' : 'normal'  // before-after 模板模式
-    // before-after 模式：结构固定、台词由卖点全新生成，强制走 isSameProduct=false 的台词逻辑
-    // （前端在此模式下隐藏 isSameProduct 开关）
-    const isSameProduct = mode === 'before-after' ? false : (req.body.isSameProduct !== '0')
+    // isSameProduct 在 normal 和 before-after 模式下同义：before-after 后半段就是 normal 流程，
+    // 同产品=用参考视频真实台词，不同产品=台词全新写
+    const isSameProduct = req.body.isSameProduct !== '0'
     const tiktokVideoUrl = req.body.tiktokVideoUrl || ''  // TikTok 视频链接（可替代上传视频）
     const batchCount = parseInt(req.body.batchCount) || 1
     const resolution = req.body.resolution || '480p'
