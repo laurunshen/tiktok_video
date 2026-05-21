@@ -4,6 +4,7 @@
 import { GoogleGenAI } from '@google/genai'
 import axios from 'axios'
 import sharp from 'sharp'
+import { generateContentWithRetry } from './gemini-retry.js'
 
 // AI Studio API key 直连（详见 gemini.js 注释）
 const genai = new GoogleGenAI({
@@ -104,11 +105,11 @@ Return ONLY the JSON array, no markdown fences, no explanation.`
 
     // 3) 调 Gemini
     try {
-      const response = await genai.models.generateContent({
+      const response = await generateContentWithRetry(genai, {
         model: 'gemini-3.1-pro-preview',
         contents: [{ role: 'user', parts: contentParts }],
         config: { temperature: 0 },
-      })
+      }, { label: 'AI识别颜色' })
       const raw = response.candidates?.[0]?.content?.parts?.[0]?.text || ''
       const cleaned = raw.replace(/```json|```/g, '').trim()
       const parsed = JSON.parse(cleaned)
@@ -209,11 +210,11 @@ Pick exactly ONE SKU name from those shown. Return ONLY this JSON:
   })
 
   try {
-    const response = await genai.models.generateContent({
+    const response = await generateContentWithRetry(genai, {
       model: 'gemini-3.1-pro-preview',
       contents: [{ role: 'user', parts }],
       config: { temperature: 0 },
-    })
+    }, { label: 'AI推荐SKU' })
     const raw = response.candidates?.[0]?.content?.parts?.[0]?.text || ''
     const cleaned = raw.replace(/```json|```/g, '').trim()
     const parsed = JSON.parse(cleaned)

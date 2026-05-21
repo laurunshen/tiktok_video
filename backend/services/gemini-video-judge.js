@@ -8,6 +8,7 @@ import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import axios from 'axios'
 import sharp from 'sharp'
+import { generateContentWithRetry } from './gemini-retry.js'
 
 // AI Studio API key 直连（详见 gemini.js 注释）
 const genai = new GoogleGenAI({
@@ -124,10 +125,10 @@ Return ONLY valid JSON:
 }`,
   })
 
-  const response = await genai.models.generateContent({
+  const response = await generateContentWithRetry(genai, {
     model: 'gemini-3.1-pro-preview',
     contents: [{ role: 'user', parts }],
-  })
+  }, { label: 'Gemini 视频评分' })
   const text = response.candidates?.[0]?.content?.parts?.[0]?.text || ''
   const cleaned = text.replace(/```json|```/g, '').trim()
   try {
@@ -201,10 +202,10 @@ Return ONLY valid JSON:
 }`,
   })
 
-  const response = await genai.models.generateContent({
+  const response = await generateContentWithRetry(genai, {
     model: 'gemini-3.1-pro-preview',
     contents: [{ role: 'user', parts }],
-  })
+  }, { label: 'Gemini 视频评分' })
   const text = response.candidates?.[0]?.content?.parts?.[0]?.text || ''
   const cleaned = text.replace(/```json|```/g, '').trim()
   try {

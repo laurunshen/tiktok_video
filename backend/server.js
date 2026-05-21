@@ -25,6 +25,8 @@ import { mkdir } from 'fs/promises'
 import generateRouter from './routes/generate.js'
 import callbackRouter from './routes/callback.js'
 import productRouter from './routes/product.js'
+import templatesRouter from './routes/templates.js'
+import beforeAfterRouter from './routes/before-after.js'
 import { initDb } from './services/db.js'
 
 const app = express()
@@ -42,6 +44,8 @@ app.use(express.json())
 app.use('/api/generate', generateRouter)
 app.use('/api/callback', callbackRouter)
 app.use('/api/product', productRouter)
+app.use('/api/templates', templatesRouter)
+app.use('/api/before-after', beforeAfterRouter)
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() })

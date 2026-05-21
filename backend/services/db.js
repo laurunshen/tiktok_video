@@ -168,6 +168,23 @@ export async function initDb() {
     await client.query('CREATE INDEX IF NOT EXISTS idx_refvids_roi ON reference_videos(roi)')
     await client.query('CREATE INDEX IF NOT EXISTS idx_refvids_benchmark ON reference_videos(is_benchmark)')
 
+    // --- my_templates 表 ---
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS my_templates (
+        id SERIAL PRIMARY KEY,
+        video_url TEXT NOT NULL,
+        tiktok_video_id TEXT,
+        job_id TEXT,
+        prompt TEXT,
+        review_scores TEXT,
+        views INTEGER,
+        orders INTEGER,
+        ctr DOUBLE PRECISION,
+        notes TEXT,
+        created_at BIGINT
+      )
+    `)
+
     // --- 平滑升级：新列 ---
     const addCol = async (table, col, type) => {
       try { await client.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${type}`) } catch {}
@@ -879,6 +896,61 @@ export async function listBenchmarkVideos({ productId = null, category = null, l
   query += ` ORDER BY roi DESC LIMIT ${np(limit)}`
   const { rows } = await pool.query(query, params)
   return rows
+}
+
+// ===== My Templates 操作 =====
+
+export async function listTemplates() {
+  const { rows } = await pool.query('SELECT * FROM my_templates ORDER BY created_at DESC')
+  return rows
+}
+
+export async function saveTemplate(data) {
+  const { rows } = await pool.query(`
+    INSERT INTO my_templates (video_url, tiktok_video_id, job_id, prompt, review_scores, views, orders, ctr, notes, created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    RETURNING *
+  `, [
+    data.video_url,
+    data.tiktok_video_id ?? null,
+    data.job_id ?? null,
+    data.prompt ?? null,
+    data.review_scores ?? null,
+    data.views ?? null,
+    data.orders ?? null,
+    data.ctr ?? null,
+    data.notes ?? null,
+    Date.now(),
+  ])
+  return rows[0]
+}
+
+export async function updateTemplate(id, data) {
+  const fields = ['views', 'orders', 'ctr', 'notes', 'prompt', 'review_scores']
+  const sets = []
+  const vals = []
+  let i = 1
+  for (const f of fields) {
+    if (data[f] !== undefined) {
+      sets.push(`${f}=$${i++}`)
+      vals.push(data[f])
+    }
+  }
+  if (sets.length === 0) {
+    const { rows } = await pool.query('SELECT * FROM my_templates WHERE id = $1', [id])
+    return rows[0] || null
+  }
+  vals.push(id)
+  const { rows } = await pool.query(
+    `UPDATE my_templates SET ${sets.join(',')} WHERE id=$${i} RETURNING *`,
+    vals
+  )
+  return rows[0] || null
+}
+
+export async function deleteTemplate(id) {
+  const { rowCount } = await pool.query('DELETE FROM my_templates WHERE id = $1', [id])
+  return rowCount > 0
 }
 
 export async function pruneOldFailedJobs(daysAgo = 30) {

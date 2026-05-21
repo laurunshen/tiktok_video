@@ -5,6 +5,7 @@ import path from 'path'
 import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import axios from 'axios'
+import { generateContentWithRetry } from './gemini-retry.js'
 
 // 用 AI Studio API key 直连（key 绑定到 GCP 项目 eternal-concept-492907-q3，仍烧 Cloud 赠金）
 // 之前走 Vertex（user-account ADC）会因 RAPT 政策每隔 16h-几周强制重登 → 已弃
@@ -653,10 +654,10 @@ Return ONLY this valid JSON, no markdown fences, no explanation:
 }`,
   })
 
-  const response = await genai.models.generateContent({
+  const response = await generateContentWithRetry(genai, {
     model: 'gemini-3.1-pro-preview',
     contents: [{ role: 'user', parts }],
-  })
+  }, { label: 'Gemini 单次调用' })
 
   if (!response.candidates || response.candidates.length === 0) {
     console.error('Gemini 返回空 candidates，完整响应:', JSON.stringify(response, null, 2))
@@ -1076,11 +1077,11 @@ Return ONLY this valid JSON, no markdown fences, no explanation:
   })
 
   const t0 = Date.now()
-  const response = await genai.models.generateContent({
+  const response = await generateContentWithRetry(genai, {
     model: 'gemini-3.1-pro-preview',
     contents: [{ role: 'user', parts }],
     config: { temperature: 0 },
-  })
+  }, { label: 'Gemini Pass 1' })
   console.log(`  [Gemini Pass 1] 完成（${((Date.now() - t0) / 1000).toFixed(1)}s）`)
 
   if (!response.candidates || response.candidates.length === 0) {
@@ -1110,10 +1111,11 @@ async function geminiPass2WritePrompt({
   userDescription,
   variantRecipe,  // 可选：{label, presenter, scene, cardigan_color}，用于裂变
   slimMode = false,
+  mode = 'normal',  // 'normal' | 'before-after'：before-after 走独立衍生模板，普通任务字节级不变
 }) {
   const dialogueRule = isSameProduct
     ? `1. SPOKEN DIALOGUE: Use the compressed_script verbatim from PASS 1 ANALYSIS. Distribute it across the SHOT SEQUENCE shots, preserving the exact wording.`
-    : `1. SPOKEN DIALOGUE: Use the compressed_script verbatim from PASS 1 ANALYSIS as the dialogue. It was already written fresh based on this product.`
+    : `1. SPOKEN DIALOGUE: Write ENTIRELY NEW dialogue based on the product info and "User's additional ideas" provided below. DO NOT use any content, wording, or selling points from the reference video's compressed_script or transcript — the reference video is a DIFFERENT product. The dialogue must only talk about THIS product's features and the concept described by the user.`
 
   // PRODUCT VISUAL ANCHOR 块 — slim 模式（≥6 张同 SKU 图）只列必要字段，省 ~300 字符且消除矛盾源
   const productAnchorBlock = slimMode
@@ -1206,8 +1208,13 @@ ${pass1Result.video_analysis?.shot_sequence || '(no shot sequence extracted — 
 
 REWRITE this reference shot sequence into our SHOT SEQUENCE format following these rules:
   1. PRESERVE original TIMING — scale the reference's timestamps proportionally to fit ${targetDuration}s total. If reference is 30s and our target is 13s, divide every timestamp by 30/13.
-  2. PRESERVE original ACTIONS — keep what the presenter does each shot. EXCEPTION: if a reference action violates ACTION SAFETY above, replace with the closest SURFACE-ONLY alternative (e.g. "tugs at strap with fingers" → "flat palm rests on strap area").
-  3. PRESERVE original DIALOGUE DISTRIBUTION — use compressed_script lines for each shot following the reference's word-per-shot distribution.
+  2. PRESERVE original ACTIONS — keep what the presenter does each shot.
+     EXCEPTION A — SAFETY: if a reference action violates ACTION SAFETY above, replace with the closest SURFACE-ONLY alternative (e.g. "tugs at strap with fingers" → "flat palm rests on strap area").
+     EXCEPTION B — FEATURE MISMATCH: if a reference action demonstrates or draws attention to a SPECIFIC product feature (e.g. squeezing a padded cup to show push-up lift, unclipping a front closure, flipping lace trim, converting/re-routing a multiway strap, peeling off a stick-on cup), cross-check that feature against [PRODUCT VISUAL ANCHOR]. If THIS product does NOT have that feature, copying the action would misrepresent the product — REPLACE it with a neutral action that does not reference the missing feature (talking to camera, hand resting on collarbone, turning slightly to show overall fit/silhouette). NEVER demonstrate or call attention to a feature this product does not have.
+  3. ${isSameProduct
+    ? 'PRESERVE original DIALOGUE DISTRIBUTION — use compressed_script lines for each shot following the reference\'s word-per-shot distribution.'
+    : 'PRESERVE original TIMING/WORD-COUNT DISTRIBUTION only — copy how many words fall in each shot based on the reference\'s timing. But write ENTIRELY NEW dialogue content from the product info and user\'s concept. DO NOT copy any words, phrases, or selling points from the reference shot sequence.'
+  }
   4. ADAPT locations/props to a generic indoor home setting (bedroom / living room / bathroom). Do NOT copy the reference's specific location.
   5. MAP OUTFITS to what the reference does: if the reference shows an outfit change (cardigan on→off) at a specific time, preserve that switch at the same proportional time. If reference is single-outfit one-take, KEEP single-outfit.
   6. ANTI-MIRROR-FLIP REWRITE (CRITICAL — Seedance frequently cheats here by horizontally flipping the previous frame):
@@ -1234,7 +1241,7 @@ REFERENCE METADATA (use as soft guides when rewriting):
   • hook_type: <copy from pass1Result.narrative_dna.hook_type>
   • tone_register: <copy from pass1Result.narrative_dna.tone_register>
   • unique_creative_signature: <copy from pass1Result.narrative_dna.unique_creative_signature> — at least one shot must visibly reflect this element.
-  • key_phrases: <copy from pass1Result.narrative_dna.key_phrases as JSON array> — at least ONE of these phrases must appear verbatim in the dialogue.
+  • key_phrases: <copy from pass1Result.narrative_dna.key_phrases as JSON array> — ${isSameProduct ? 'at least ONE of these phrases must appear verbatim in the dialogue.' : 'use ONLY as speaking cadence/energy reference. DO NOT use these words in the new video — they are from a different product.'}
 
 [STYLE]
 Camera: Phone-held, VISIBLY SHAKY — slight drift, micro-wobble, occasional reframe. NOT a tripod or gimbal.
@@ -1353,7 +1360,42 @@ PRODUCT INTEGRITY — when the product is shown held in hand or off-body, it mus
 CONSISTENCY: Cross-check the AVOID list against the ANCHOR before finalizing — if any banned feature is also listed in the ANCHOR as present (e.g. "no buttons" but ANCHOR says product has buttons), REMOVE it from AVOID. Self-contradicting rules confuse the model.
 ---`
 
-  const task3 = category === 'lingerie' ? task3Lingerie : task3General
+  // === before-after 模板（独立衍生，不污染主流程）===
+  // 原则：task3Lingerie 本体一字不改；before-after 模式对它做两处定向替换后另存为 task3BeforeAfter。
+  // mode !== 'before-after' 时这段完全不执行，普通任务的 task3 与改动前字节级一致。
+  function deriveBeforeAfterTemplate(base) {
+    const colorOld = `[COLOR — only <DOMINANT_COLOR>]
+The bra is <DOMINANT_COLOR> in every frame. OUTFIT must say "<DOMINANT_COLOR> bra"; OPENING LINE must include the color; mention "<DOMINANT_COLOR>" in SHOT SEQUENCE at least 2 more times. NEVER write "any color" or alternate color names.`
+    const colorNew = `[COLOR — only <DOMINANT_COLOR>]
+The bra is <DOMINANT_COLOR> in every frame. In addition to the color NAME, write a plain VISUAL description of the shade — its lightness and hue (e.g. "a light nude close to pale skin tone", "a true mid-grey") — AND an explicit exclusion of the nearest WRONG shades the video model tends to drift toward (e.g. "NOT brown, NOT mocha, NOT dark tan"). OUTFIT must say "<DOMINANT_COLOR> bra"; OPENING LINE must include the color; mention the color name + its visual description in SHOT SEQUENCE at least 2 more times. NEVER write "any color" or alternate color names.`
+
+    const shotAnchor = `Every shot = a real person doing something. No static images. No product-on-white-background shots.`
+    const hookDirective = `${shotAnchor}
+
+BEFORE-AFTER HOOK (MANDATORY — this is a before/after template video):
+The FIRST 2 seconds (0:00-0:02) MUST be a rapid-fire hook: jump cuts alternating between LOOK A (the old/problem bra) and LOOK B (this product) roughly every half second. This is a deliberate, EXECUTABLE TikTok editing pattern — the video model renders it as separate short cut segments, NOT as in-frame morphing. Keep the presenter's pose simple and stable in the hook (hands relaxed at her sides) so ONLY the bra changes between cuts.
+LOOK B in the hook MUST be described with MAXIMUM RIGIDITY: a single dense sentence built from the [PRODUCT VISUAL ANCHOR] fields (silhouette + structure + cup type + straps + fabric) PLUS the color name and its visual description from the [COLOR] block PLUS the wrong-shade exclusions. Reuse this exact LOOK B sentence verbatim every time LOOK B appears.
+ACCEPT that the rapid-cut zone will show slight product drift — that is an inherent cost of fast cuts and is acceptable here, because the hook's job is the A/B contrast impact, not product detail. Product accuracy is carried by the slower dwell shots AFTER 0:02.
+After 0:02 — TRANSITION THEN NORMAL:
+The FIRST 1-2 spoken sentences after 0:02 MUST briefly land the SAME before/after selling point the hook is built around (see "User's additional ideas" / the user's concept) — a quick verbal pay-off that bridges the hook into the main content. Keep it to 1-2 sentences, do not dwell.
+Cover that hook selling point ONCE here only — do NOT mention or repeat it again anywhere later in the video.
+Everything after this transition follows the reference video's shot-by-shot skeleton and rhythm normally (same as a normal-mode video), covering the product's OTHER content and selling points — simply SKIP the hook's selling point since it is already addressed in the transition.`
+
+    let out = base
+    if (!out.includes(colorOld)) {
+      throw new Error('before-after 衍生失败：COLOR 块锚点未匹配，task3Lingerie 模板可能已变更')
+    }
+    out = out.replace(colorOld, colorNew)
+    if (!out.includes(shotAnchor)) {
+      throw new Error('before-after 衍生失败：SHOT SEQUENCE 锚点未匹配，task3Lingerie 模板可能已变更')
+    }
+    out = out.replace(shotAnchor, hookDirective)
+    return out
+  }
+
+  const task3 = mode === 'before-after'
+    ? deriveBeforeAfterTemplate(task3Lingerie)  // before-after 强制走衍生 lingerie 模板
+    : (category === 'lingerie' ? task3Lingerie : task3General)
 
   const parts = []
   parts.push({
@@ -1377,7 +1419,47 @@ ${productInfoText ? `\n=== PRODUCT LISTING INFO (treat as ground truth) ===\n${p
 ${scriptModeInstruction}
 
 === PASS 1 ANALYSIS RESULT (use as input) ===
-${JSON.stringify(pass1Result, null, 2)}
+${JSON.stringify((() => {
+  if (isSameProduct) return pass1Result
+  // isSameProduct=false: 把台词内容替换成节奏模板，保留语速/句长/语气，抹掉产品相关语义
+  const cleaned = JSON.parse(JSON.stringify(pass1Result))
+
+  // 把一段台词转换成节奏模板："After two kids..." → "[~9 words, fast, personal confession]"
+  const toRhythmTemplate = (text) => {
+    if (!text || typeof text !== 'string') return text
+    const words = text.trim().split(/\s+/).length
+    const isExclamation = /[!]/.test(text) || /^(oh|wow|omg|wait|no)/i.test(text)
+    const isQuestion = /[?]/.test(text)
+    const isConfession = /(i |my |me )/i.test(text)
+    const isProblem = /(hate|wrong|bad|never|always|every time|struggle)/i.test(text)
+    const energy = isExclamation ? 'high energy exclamation' : isProblem ? 'frustrated problem statement' : isConfession ? 'personal confession' : isQuestion ? 'rhetorical question' : 'conversational statement'
+    return `[~${words} words, ${energy} — write new content from product info and user concept, match this rhythm]`
+  }
+
+  // 替换 compressed_script
+  if (cleaned.compressed_script) {
+    cleaned.compressed_script = toRhythmTemplate(cleaned.compressed_script)
+  }
+  if (cleaned.transcript) {
+    cleaned.transcript = '[REDACTED — different product. Use speaking_style and tone_register for cadence reference only.]'
+  }
+
+  // 替换 shot_sequence 里的台词行，保留时间戳和动作
+  if (cleaned.video_analysis?.shot_sequence) {
+    cleaned.video_analysis.shot_sequence = cleaned.video_analysis.shot_sequence
+      .replace(/Dialogue:\s*"([^"]*)"/gi, (_, dialogue) =>
+        `Dialogue: "${toRhythmTemplate(dialogue)}"`)
+      .replace(/dialogue:\s*"([^"]*)"/gi, (_, dialogue) =>
+        `dialogue: "${toRhythmTemplate(dialogue)}"`)
+  }
+
+  // key_phrases：只保留语气词，去掉产品相关短语
+  if (cleaned.narrative_dna?.key_phrases) {
+    cleaned.narrative_dna.key_phrases = '[REDACTED — different product. Use tone_register and speaking_style for cadence only, do not copy phrases.]'
+  }
+
+  return cleaned
+})(), null, 2)}
 === END PASS 1 ===
 
 ${task3}
@@ -1415,10 +1497,10 @@ Return ONLY this valid JSON, no markdown fences, no explanation:
   })
 
   const t0 = Date.now()
-  const response = await genai.models.generateContent({
+  const response = await generateContentWithRetry(genai, {
     model: 'gemini-3.1-pro-preview',
     contents: [{ role: 'user', parts }],
-  })
+  }, { label: 'Gemini Pass 2' })
   console.log(`  [Gemini Pass 2] 完成（${((Date.now() - t0) / 1000).toFixed(1)}s）`)
 
   if (!response.candidates || response.candidates.length === 0) {
@@ -1448,6 +1530,7 @@ export async function analyzeAndGeneratePrompt({
   productInfo = null,
   isSameProduct = true,
   variantSeed = null,  // 1-5 选不同的模特+场景配方，避免标杆复用时被查重
+  mode = 'normal',  // 'normal' | 'before-after'
 }) {
   const variantRecipe = getVariantRecipe(variantSeed)
   if (variantRecipe) {
@@ -1523,6 +1606,7 @@ The reference video is NOT for the same product — it is used as a STYLE REFERE
       userDescription,
       variantRecipe,
       slimMode,
+      mode,
     })
   } finally {
     // 清理临时视频文件

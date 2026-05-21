@@ -300,6 +300,12 @@ export default function HistoryView() {
   // 运行中 job 的实时状态（每 8s 轮询）
   const [liveStatus, setLiveStatus] = useState({})  // jobId → { status, stepLabel, fetchedAt, stepStart }
   const [nowTick, setNowTick] = useState(Date.now())
+  // 存为模板
+  const [savedTemplateJobIds, setSavedTemplateJobIds] = useState(new Set())  // 已存过的 jobId
+  const [saveFormOpen, setSaveFormOpen] = useState(null)  // jobId | null
+  const [saveForm, setSaveForm] = useState({ video_url: '', views: '', orders: '', ctr: '', notes: '' })
+  const [savingTemplate, setSavingTemplate] = useState(false)
+  const [saveTemplateErr, setSaveTemplateErr] = useState(null)
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
@@ -415,6 +421,46 @@ export default function HistoryView() {
       const data = await r.json()
       if (r.ok) setDetails(prev => ({ ...prev, [jobId]: data }))
     } catch {}
+  }
+
+  const openSaveForm = (jobId) => {
+    setSaveFormOpen(jobId)
+    setSaveForm({ video_url: '', views: '', orders: '', ctr: '', notes: '' })
+    setSaveTemplateErr(null)
+  }
+
+  const handleSaveTemplate = async (job) => {
+    if (!saveForm.video_url.trim()) { setSaveTemplateErr('请填写视频链接'); return }
+    setSavingTemplate(true); setSaveTemplateErr(null)
+    try {
+      const detail = details[job.job_id]
+      const prompt = detail?.videos?.[0]?.prompt || null
+      const reviewScores = detail?.videos?.[0]?.videoJudgeScores
+        ? JSON.stringify(detail.videos[0].videoJudgeScores)
+        : null
+      const body = {
+        video_url: saveForm.video_url.trim(),
+        job_id: job.job_id,
+        prompt,
+        review_scores: reviewScores,
+        views: saveForm.views !== '' ? Number(saveForm.views) : null,
+        orders: saveForm.orders !== '' ? Number(saveForm.orders) : null,
+        ctr: saveForm.ctr !== '' ? Number(saveForm.ctr) : null,
+        notes: saveForm.notes || null,
+      }
+      const r = await fetch(`${API}/templates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!r.ok) { const d = await r.json(); throw new Error(d.error || `HTTP ${r.status}`) }
+      setSavedTemplateJobIds(prev => new Set([...prev, job.job_id]))
+      setSaveFormOpen(null)
+    } catch (e) {
+      setSaveTemplateErr(e.message)
+    } finally {
+      setSavingTemplate(false)
+    }
   }
 
   return (
@@ -579,6 +625,71 @@ export default function HistoryView() {
                           }} />
                         </div>
                       ))}
+                      {/* 存为模板 */}
+                      <div style={{ marginTop: 12 }}>
+                        {savedTemplateJobIds.has(job.job_id) ? (
+                          <span style={{ fontSize: 12, color: '#16a34a', fontWeight: 600 }}>✅ 已存入模板库</span>
+                        ) : saveFormOpen === job.job_id ? (
+                          <div style={{ padding: 14, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: '#333', marginBottom: 10 }}>⭐ 存为模板</div>
+                            {saveTemplateErr && <div style={{ fontSize: 12, color: '#b91c1c', marginBottom: 8 }}>⚠️ {saveTemplateErr}</div>}
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              <input
+                                style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid #ddd', fontSize: 13, outline: 'none' }}
+                                placeholder="TikTok 发布后的视频链接 *"
+                                value={saveForm.video_url}
+                                onChange={e => setSaveForm(f => ({ ...f, video_url: e.target.value }))}
+                              />
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                <input
+                                  style={{ flex: 1, padding: '7px 10px', borderRadius: 6, border: '1px solid #ddd', fontSize: 13, outline: 'none' }}
+                                  type="number" placeholder="播放量"
+                                  value={saveForm.views}
+                                  onChange={e => setSaveForm(f => ({ ...f, views: e.target.value }))}
+                                />
+                                <input
+                                  style={{ flex: 1, padding: '7px 10px', borderRadius: 6, border: '1px solid #ddd', fontSize: 13, outline: 'none' }}
+                                  type="number" placeholder="出单数"
+                                  value={saveForm.orders}
+                                  onChange={e => setSaveForm(f => ({ ...f, orders: e.target.value }))}
+                                />
+                                <input
+                                  style={{ flex: 1, padding: '7px 10px', borderRadius: 6, border: '1px solid #ddd', fontSize: 13, outline: 'none' }}
+                                  type="number" step="0.01" placeholder="CTR (%)"
+                                  value={saveForm.ctr}
+                                  onChange={e => setSaveForm(f => ({ ...f, ctr: e.target.value }))}
+                                />
+                              </div>
+                              <input
+                                style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid #ddd', fontSize: 13, outline: 'none' }}
+                                placeholder="备注（可选）"
+                                value={saveForm.notes}
+                                onChange={e => setSaveForm(f => ({ ...f, notes: e.target.value }))}
+                              />
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                <button
+                                  disabled={savingTemplate}
+                                  onClick={() => handleSaveTemplate(job)}
+                                  style={{ padding: '7px 16px', borderRadius: 6, border: 'none', background: '#6366f1', color: '#fff', fontSize: 12, fontWeight: 600, cursor: savingTemplate ? 'not-allowed' : 'pointer' }}>
+                                  {savingTemplate ? '保存中…' : '提交'}
+                                </button>
+                                <button
+                                  onClick={() => setSaveFormOpen(null)}
+                                  style={{ padding: '7px 14px', borderRadius: 6, border: '1px solid #ddd', background: '#fff', color: '#555', fontSize: 12, cursor: 'pointer' }}>
+                                  取消
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => openSaveForm(job.job_id)}
+                            style={{ padding: '6px 14px', borderRadius: 6, border: '1px solid #fbbf24', background: '#fef3c7', color: '#92400e', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                            ⭐ 存为模板
+                          </button>
+                        )}
+                      </div>
+
                       {detail.job?.referenceVideoUrl && (
                         <div style={s.detailRow}>
                           <span style={s.detailKey}>参考视频</span>

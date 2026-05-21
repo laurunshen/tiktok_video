@@ -168,7 +168,10 @@ router.post('/', upload.fields([
     const userScript = req.body.userScript || ''
     const category = req.body.category || 'general'
     const productInfo = req.body.productInfo ? JSON.parse(req.body.productInfo) : null
-    const isSameProduct = req.body.isSameProduct !== '0'
+    const mode = req.body.mode === 'before-after' ? 'before-after' : 'normal'  // before-after 模板模式
+    // before-after 模式：结构固定、台词由卖点全新生成，强制走 isSameProduct=false 的台词逻辑
+    // （前端在此模式下隐藏 isSameProduct 开关）
+    const isSameProduct = mode === 'before-after' ? false : (req.body.isSameProduct !== '0')
     const tiktokVideoUrl = req.body.tiktokVideoUrl || ''  // TikTok 视频链接（可替代上传视频）
     const batchCount = parseInt(req.body.batchCount) || 1
     const resolution = req.body.resolution || '480p'
@@ -276,6 +279,7 @@ router.post('/', upload.fields([
         productInfo,
         isSameProduct,
         variantSeed,
+        mode,
       })
       console.log(`[${jobId}] 类目: ${geminiResult.video_analysis?.product_category}，选中图片: ${geminiResult.selected_image_indices}`)
 
@@ -370,6 +374,7 @@ router.post('/', upload.fields([
             productVisualFeatures: geminiResult.product_visual_features,
             productImageUrls: finalReferenceImageUrls,
             targetDuration: duration,
+            mode,
           })
         } catch (e) {
           console.warn(`[${jobId}] 评估调用异常（跳过评估，使用当前 prompt）: ${e.message}`)

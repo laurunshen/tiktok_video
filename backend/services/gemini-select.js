@@ -1,6 +1,7 @@
 import { GoogleGenAI } from '@google/genai'
 import { readFile } from 'fs/promises'
 import path from 'path'
+import { generateContentWithRetry } from './gemini-retry.js'
 
 const genai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
 
@@ -130,10 +131,10 @@ Return ONLY this valid JSON, no markdown fences, no explanation:
 }`,
   })
 
-  const response = await genai.models.generateContent({
+  const response = await generateContentWithRetry(genai, {
     model: 'gemini-3.1-pro-preview',
     contents: [{ parts }],
-  })
+  }, { label: 'Gemini select' })
 
   // 兼容不同响应结构
   if (!response.candidates || response.candidates.length === 0) {
