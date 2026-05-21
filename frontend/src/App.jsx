@@ -552,6 +552,106 @@ export default function App() {
         {tab === 'generate' && (
         <>
 
+        {/* 选择产品 */}
+        <div style={s.card}>
+          <div style={s.cardTitle}>选择产品</div>
+          {cachedProducts.length === 0 ? (
+            <div style={{ padding: 20, textAlign: 'center', color: '#888', fontSize: 13 }}>
+              暂无产品。<br />去 <strong>📦 产品管理</strong> tab 贴 TikTok Shop 链接抓取，再回来这里。
+            </div>
+          ) : (
+            <div style={s.prodPick}>
+              {cachedProducts.map(p => {
+                const active = productInfo?.productId === p.productId
+                return (
+                  <div key={p.productId} style={s.prodCard(active)} onClick={() => selectCachedProduct(p.productId)}>
+                    {p.coverImageUrl
+                      ? <img src={p.coverImageUrl} alt="" style={s.prodCardCover} loading="lazy" />
+                      : <div style={{ ...s.prodCardCover, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, color: '#bbb' }}>📦</div>}
+                    <div style={s.prodCardName}>{p.name || '(未命名)'}</div>
+                    <div style={s.prodCardMeta}>
+                      {p.region} · 图 {p.mainImageCount + p.detailImageCount + p.userImageCount}
+                      {p.userImageCount > 0 && ` (+${p.userImageCount} 自定义)`}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {productInfo && (
+            <div style={{ marginTop: 14, padding: 12, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, fontSize: 13 }}>
+              <div style={{ fontWeight: 600, color: '#15803d', marginBottom: 4 }}>✅ 已选：{productInfo.name?.slice(0, 60)}</div>
+              <div style={{ color: '#166534', fontSize: 12 }}>id: {productInfo.productId}</div>
+            </div>
+          )}
+          {productColorInventory && Object.keys(productColorInventory).length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <label style={s.label}>SKU 变体（强烈推荐：只用同一 SKU 的图防止生成串色）</label>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <select style={{ ...s.select, flex: 1 }} value={productSkuColor}
+                  onChange={e => setProductSkuColor(e.target.value)}>
+                  <option value="">— 不过滤（用全部图）—</option>
+                  {Object.entries(productColorInventory).map(([c, n]) => (
+                    <option key={c} value={c}>{c} （{n} 张）</option>
+                  ))}
+                </select>
+                <button style={{ ...s.btnGhost, padding: '8px 12px', fontSize: 12, whiteSpace: 'nowrap' }}
+                  disabled={!productInfo?.productId}
+                  onClick={async () => {
+                    if (!productInfo?.productId) return
+                    setProductSkuRecommendation({ loading: true })
+                    try {
+                      const r = await fetch(`${API}/product/${productInfo.productId}/recommend-sku`)
+                      const data = await r.json()
+                      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
+                      setProductSkuRecommendation(data)
+                    } catch (e) {
+                      setProductSkuRecommendation({ error: e.message })
+                    }
+                  }}>
+                  🌟 AI 推荐
+                </button>
+              </div>
+              {productSkuRecommendation && (
+                <div style={{ marginTop: 6, padding: '8px 10px', background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 6, fontSize: 12 }}>
+                  {productSkuRecommendation.loading && <span>评估中…</span>}
+                  {productSkuRecommendation.error && <span style={{ color: '#b91c1c' }}>失败：{productSkuRecommendation.error}</span>}
+                  {productSkuRecommendation.recommended && (
+                    <>
+                      <strong>推荐：{productSkuRecommendation.recommended}</strong>
+                      {productSkuRecommendation.counts?.[productSkuRecommendation.recommended] && (
+                        <span> （{productSkuRecommendation.counts[productSkuRecommendation.recommended]} 张图）</span>
+                      )}
+                      <button style={{ ...s.btnGhost, marginLeft: 8, padding: '2px 8px', fontSize: 11 }}
+                        onClick={() => setProductSkuColor(productSkuRecommendation.recommended)}>
+                        应用
+                      </button>
+                      <div style={{ marginTop: 4, color: '#78350f' }}>{productSkuRecommendation.reason}</div>
+                    </>
+                  )}
+                  {!productSkuRecommendation.loading && !productSkuRecommendation.error && !productSkuRecommendation.recommended && (
+                    <span>{productSkuRecommendation.reason || '无法推荐'}</span>
+                  )}
+                </div>
+              )}
+              {productSkuColor && productInfo && (
+                (() => {
+                  const total = (productInfo.mainImageUrls?.length || 0) + (productInfo.detailImageUrls?.length || 0)
+                  if (total === 0) {
+                    return <div style={{ marginTop: 6, fontSize: 12, color: '#be123c' }}>⚠️ 没有符合该 SKU 的图，生成按钮已禁用。请去产品管理打标或选其他 SKU。</div>
+                  }
+                  return <div style={{ marginTop: 6, fontSize: 12, color: '#16a34a' }}>✓ {total} 张 {productSkuColor} 图将用于本次生成</div>
+                })()
+              )}
+            </div>
+          )}
+          {productColorInventory && Object.keys(productColorInventory).length === 0 && productAllImages && (
+            <div style={{ marginTop: 12, padding: 10, background: '#fef3c7', borderRadius: 6, fontSize: 12, color: '#92400e' }}>
+              ⚠️ 该产品所有图都未标颜色。建议先去 📦 产品管理 → 🪄 AI 一键识别颜色，再回来选 SKU 颜色防止生成串色。
+            </div>
+          )}
+        </div>
+
         {/* 参考视频 */}
         <div style={s.card}>
           <div style={s.cardTitle}>参考视频</div>
@@ -777,106 +877,6 @@ export default function App() {
                   })}
                 </div>
               )}
-            </div>
-          )}
-        </div>
-
-        {/* 选择产品 */}
-        <div style={s.card}>
-          <div style={s.cardTitle}>选择产品</div>
-          {cachedProducts.length === 0 ? (
-            <div style={{ padding: 20, textAlign: 'center', color: '#888', fontSize: 13 }}>
-              暂无产品。<br />去 <strong>📦 产品管理</strong> tab 贴 TikTok Shop 链接抓取，再回来这里。
-            </div>
-          ) : (
-            <div style={s.prodPick}>
-              {cachedProducts.map(p => {
-                const active = productInfo?.productId === p.productId
-                return (
-                  <div key={p.productId} style={s.prodCard(active)} onClick={() => selectCachedProduct(p.productId)}>
-                    {p.coverImageUrl
-                      ? <img src={p.coverImageUrl} alt="" style={s.prodCardCover} loading="lazy" />
-                      : <div style={{ ...s.prodCardCover, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, color: '#bbb' }}>📦</div>}
-                    <div style={s.prodCardName}>{p.name || '(未命名)'}</div>
-                    <div style={s.prodCardMeta}>
-                      {p.region} · 图 {p.mainImageCount + p.detailImageCount + p.userImageCount}
-                      {p.userImageCount > 0 && ` (+${p.userImageCount} 自定义)`}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-          {productInfo && (
-            <div style={{ marginTop: 14, padding: 12, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, fontSize: 13 }}>
-              <div style={{ fontWeight: 600, color: '#15803d', marginBottom: 4 }}>✅ 已选：{productInfo.name?.slice(0, 60)}</div>
-              <div style={{ color: '#166534', fontSize: 12 }}>id: {productInfo.productId}</div>
-            </div>
-          )}
-          {productColorInventory && Object.keys(productColorInventory).length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <label style={s.label}>SKU 变体（强烈推荐：只用同一 SKU 的图防止生成串色）</label>
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                <select style={{ ...s.select, flex: 1 }} value={productSkuColor}
-                  onChange={e => setProductSkuColor(e.target.value)}>
-                  <option value="">— 不过滤（用全部图）—</option>
-                  {Object.entries(productColorInventory).map(([c, n]) => (
-                    <option key={c} value={c}>{c} （{n} 张）</option>
-                  ))}
-                </select>
-                <button style={{ ...s.btnGhost, padding: '8px 12px', fontSize: 12, whiteSpace: 'nowrap' }}
-                  disabled={!productInfo?.productId}
-                  onClick={async () => {
-                    if (!productInfo?.productId) return
-                    setProductSkuRecommendation({ loading: true })
-                    try {
-                      const r = await fetch(`${API}/product/${productInfo.productId}/recommend-sku`)
-                      const data = await r.json()
-                      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
-                      setProductSkuRecommendation(data)
-                    } catch (e) {
-                      setProductSkuRecommendation({ error: e.message })
-                    }
-                  }}>
-                  🌟 AI 推荐
-                </button>
-              </div>
-              {productSkuRecommendation && (
-                <div style={{ marginTop: 6, padding: '8px 10px', background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 6, fontSize: 12 }}>
-                  {productSkuRecommendation.loading && <span>评估中…</span>}
-                  {productSkuRecommendation.error && <span style={{ color: '#b91c1c' }}>失败：{productSkuRecommendation.error}</span>}
-                  {productSkuRecommendation.recommended && (
-                    <>
-                      <strong>推荐：{productSkuRecommendation.recommended}</strong>
-                      {productSkuRecommendation.counts?.[productSkuRecommendation.recommended] && (
-                        <span> （{productSkuRecommendation.counts[productSkuRecommendation.recommended]} 张图）</span>
-                      )}
-                      <button style={{ ...s.btnGhost, marginLeft: 8, padding: '2px 8px', fontSize: 11 }}
-                        onClick={() => setProductSkuColor(productSkuRecommendation.recommended)}>
-                        应用
-                      </button>
-                      <div style={{ marginTop: 4, color: '#78350f' }}>{productSkuRecommendation.reason}</div>
-                    </>
-                  )}
-                  {!productSkuRecommendation.loading && !productSkuRecommendation.error && !productSkuRecommendation.recommended && (
-                    <span>{productSkuRecommendation.reason || '无法推荐'}</span>
-                  )}
-                </div>
-              )}
-              {productSkuColor && productInfo && (
-                (() => {
-                  const total = (productInfo.mainImageUrls?.length || 0) + (productInfo.detailImageUrls?.length || 0)
-                  if (total === 0) {
-                    return <div style={{ marginTop: 6, fontSize: 12, color: '#be123c' }}>⚠️ 没有符合该 SKU 的图，生成按钮已禁用。请去产品管理打标或选其他 SKU。</div>
-                  }
-                  return <div style={{ marginTop: 6, fontSize: 12, color: '#16a34a' }}>✓ {total} 张 {productSkuColor} 图将用于本次生成</div>
-                })()
-              )}
-            </div>
-          )}
-          {productColorInventory && Object.keys(productColorInventory).length === 0 && productAllImages && (
-            <div style={{ marginTop: 12, padding: 10, background: '#fef3c7', borderRadius: 6, fontSize: 12, color: '#92400e' }}>
-              ⚠️ 该产品所有图都未标颜色。建议先去 📦 产品管理 → 🪄 AI 一键识别颜色，再回来选 SKU 颜色防止生成串色。
             </div>
           )}
         </div>
