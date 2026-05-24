@@ -3,6 +3,7 @@ import ProductManager from './ProductManager.jsx'
 import HistoryView from './HistoryView.jsx'
 import AffiliateVideos from './AffiliateVideos.jsx'
 import MyTemplates from './MyTemplates.jsx'
+import BenchmarkAnalyzer from './BenchmarkAnalyzer.jsx'
 
 const API = '/api'
 
@@ -515,6 +516,7 @@ export default function App() {
         <p style={s.sub}>选产品 + 参考视频 → AI 自动分析风格并生成视频</p>
 
         <div style={s.tabBar}>
+          <button style={s.tabBtn(tab === 'benchmark')} onClick={() => setTab('benchmark')}>标杆分析</button>
           <button style={s.tabBtn(tab === 'generate')} onClick={() => setTab('generate')}>🎬 生成视频</button>
           <button style={s.tabBtn(tab === 'products')} onClick={() => setTab('products')}>📦 产品管理</button>
           <button style={s.tabBtn(tab === 'history')} onClick={() => setTab('history')}>📜 历史</button>
@@ -548,6 +550,8 @@ export default function App() {
             }}
           />
         </div>
+
+        <div style={{ display: tab === 'benchmark' ? '' : 'none' }}><BenchmarkAnalyzer /></div>
 
         {tab === 'generate' && (
         <>
