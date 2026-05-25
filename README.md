@@ -1,15 +1,42 @@
-# AI Video Generator
+# TikTok Video Generator
 
-## 本地运行
+自动化生成 TikTok UGC 带货视频（参考视频风格迁移 + 商品一致性约束 + 异步生成评分）。
 
-### 1. 克隆 & 安装依赖
+详细状态与架构演进见：[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
+
+## 功能概览
+
+- 输入：商品链接（爬产品图）+ 参考视频 + 生成参数
+- 输出：9:16 竖屏短视频（当前主流程走 Seedance 2 via kie.ai）
+- 生成模式：
+  - `normal`
+  - `before-after`（含 0-2s 快切 hook + 概念助手）
+- 前端模块：
+  - 生成
+  - 产品管理
+  - 历史
+  - 达人视频
+  - 模板库
+
+## 技术栈
+
+- Frontend: React + Vite（默认 `5173`）
+- Backend: Node.js + Express（默认 `3001`）
+- Database: PostgreSQL（AWS RDS）
+- Storage: AWS S3
+- AI/Video: Gemini（分析/生成/评审）+ Seedance 2（kie.ai）
+- Media tools: `ffmpeg` + `ffprobe`
+
+## 本地开发
+
+### 1. 安装依赖
 
 ```bash
-# 后端
+# backend
 cd backend
 npm install
 
-# 前端
+# frontend
 cd ../frontend
 npm install
 ```
@@ -19,102 +46,152 @@ npm install
 ```bash
 cd backend
 cp .env.example .env
-# 编辑 .env，填入所有 API Key
+# 然后按下文补全 .env
 ```
 
-`.env` 需要填写：
-- `ANTHROPIC_API_KEY` — https://console.anthropic.com
-- `GEMINI_API_KEY` — https://aistudio.google.com
-- `KIE_TOKEN` — kie.ai 控制台
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` / `S3_BUCKET_NAME`
-- `CALLBACK_BASE_URL` — 本地测试用 ngrok（见下方）
+常用变量（以代码实际读取为准）：
 
-### 3. S3 Bucket 配置
+- API
+  - `GEMINI_API_KEY`
+  - `KIE_TOKEN`
+- Backend
+  - `PORT=3001`
+  - `CALLBACK_BASE_URL`（本地通常用 ngrok）
+- AWS / S3
+  - `AWS_ACCESS_KEY_ID`
+  - `AWS_SECRET_ACCESS_KEY`
+  - `AWS_STORAGE_BUCKET_NAME`
+  - `AWS_S3_REGION_NAME`
+  - `USE_S3=TRUE`
+- PostgreSQL
+  - `DB_HOST`
+  - `DB_PORT`
+  - `DB_NAME`
+  - `DB_USER`
+  - `DB_PASSWORD`
+- FFmpeg（可选，PATH 不可用时再配）
+  - `FFMPEG_PATH`
+  - `FFPROBE_PATH`
 
-Bucket 需要允许公开读取，在 AWS Console 里：
-- Permissions → Block public access → 全部关闭
-- Bucket Policy 添加：
+### 3. 安装 FFmpeg（必需）
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": "*",
-    "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::YOUR-BUCKET-NAME/*"
-  }]
-}
-```
+后端会调用 `ffmpeg/ffprobe` 做视频片段截取与探测。
 
-### 4. 本地 Webhook（ngrok）
-
-kie.ai 需要回调一个公网地址，本地用 ngrok 转发：
+- macOS（Homebrew）
 
 ```bash
-# 安装 ngrok: https://ngrok.com/download
-ngrok http 3001
-# 得到类似: https://abc123.ngrok.io
-# 把这个地址填入 .env 的 CALLBACK_BASE_URL
+brew install ffmpeg
 ```
 
-> 注：ngrok 每次重启地址会变，重启后需要更新 .env
-
-### 5. 启动
+- Ubuntu / Debian
 
 ```bash
-# 终端 1 - 后端
+sudo apt-get update
+sudo apt-get install -y ffmpeg
+```
+
+- Windows（任选其一）
+
+```powershell
+winget install Gyan.FFmpeg
+```
+
+安装后自检：
+
+```bash
+ffmpeg -version
+ffprobe -version
+```
+
+如果命令不可用，请把可执行文件完整路径写入 `backend/.env`：
+
+```env
+FFMPEG_PATH=/absolute/path/to/ffmpeg
+FFPROBE_PATH=/absolute/path/to/ffprobe
+```
+
+Windows 示例：
+
+```env
+FFMPEG_PATH=C:\\ffmpeg\\bin\\ffmpeg.exe
+FFPROBE_PATH=C:\\ffmpeg\\bin\\ffprobe.exe
+```
+
+### 4. 启动服务（必须前后端同时启动）
+
+必须同时启动 Frontend + Backend，缺一不可。
+
+```bash
+# 终端 1
 cd backend
 npm run dev
 
-# 终端 2 - 前端
+# 终端 2
 cd frontend
 npm run dev
 ```
 
-打开 http://localhost:5173
+访问：[http://localhost:5173](http://localhost:5173)
 
----
+说明：前端会把 `/api` 代理到 `3001`。只开前端会出现接口报错（例如 `Unexpected end of JSON input`）。
 
-## 部署到 AWS EC2
+### 5. 本地 webhook（如需回调）
+
+kie.ai 回调需要公网地址，本地通常用 ngrok：
 
 ```bash
-# 1. 上传代码
-scp -r ./video-gen ubuntu@your-ec2-ip:~/
-
-# 2. 安装 Node.js (Ubuntu)
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
-
-# 3. 安装 PM2
-sudo npm install -g pm2
-
-# 4. 后端
-cd ~/video-gen/backend
-npm install
-cp .env.example .env  # 填入生产环境变量
-# CALLBACK_BASE_URL 改为 EC2 公网 IP 或域名
-
-# 5. 前端 build
-cd ~/video-gen/frontend
-npm install
-npm run build
-# 将 dist/ 用 nginx 托管
-
-# 6. 启动后端
-cd ~/video-gen/backend
-pm2 start server.js --name video-gen-backend
-pm2 save
-pm2 startup
+ngrok http 3001
 ```
 
----
+把 ngrok 地址填到：
 
-## 工作流说明
+```env
+CALLBACK_BASE_URL=https://xxxx.ngrok-free.app
+```
 
-1. 用户上传参考视频 + 产品图片 + 自定义描述
-2. Gemini 2.0 Flash 分析参考视频（脚本、模特风格、拍摄风格）
-3. 图片 + 视频上传到 S3 获取公开 URL
-4. Claude Sonnet 筛选最佳图片，压缩脚本到15秒，生成 Seedance2 提示词
-5. 批量提交到 kie.ai（最多5个并发）
-6. 前端每8秒轮询状态，视频完成后展示
+## 常见问题排查
+
+### `ffmpeg not found`
+
+原因：
+
+- 系统未安装 `ffmpeg`
+- `ffmpeg/ffprobe` 未进入 `PATH`
+- 路径配置错误（`FFMPEG_PATH/FFPROBE_PATH`）
+
+排查顺序：
+
+1. 终端执行 `ffmpeg -version`、`ffprobe -version`
+2. 若失败，先安装 ffmpeg
+3. 仍失败则在 `backend/.env` 显式设置 `FFMPEG_PATH/FFPROBE_PATH`
+4. 重启 backend
+
+### 前端请求失败或 JSON 解析错误
+
+优先检查：
+
+1. backend 是否运行在 `3001`
+2. frontend 是否运行在 `5173`
+3. 两边是否都已启动
+
+## 项目结构
+
+```text
+tiktok_video/
+├── backend/
+│   ├── routes/
+│   └── services/
+├── frontend/
+│   └── src/
+└── docs/
+    └── PROJECT_STATUS.md
+```
+
+## 关键文档
+
+- 项目状态总览：[`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)
+- 协作约定：[`AGENTS.md`](AGENTS.md)
+
+## 备注
+
+- 本 README 以当前主分支实现为准；更细粒度的策略、模式矩阵、已知问题请以 `docs/PROJECT_STATUS.md` 为准。
