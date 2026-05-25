@@ -73,9 +73,9 @@ async function prepareImage(filePath) {
   return { buffer, useOriginal: false }
 }
 
-// 上传单个媒体文件（图片或视频片段）到 S3，失败重试一次
+// 上传单个媒体文件（图片或视频片段）到 S3，失败重试多次
 // 图片：会先 prepareImage 缩放/压缩；视频/其他：直接读 buffer 上传
-async function uploadWithRetry(filePath, originalName, retries = 1) {
+async function uploadWithRetry(filePath, originalName, retries = 3) {
   const ext = path.extname(originalName).toLowerCase()
   const isImage = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext)
 
@@ -102,8 +102,9 @@ async function uploadWithRetry(filePath, originalName, retries = 1) {
       return await uploadBufferToS3(buffer, fileName, contentType)
     } catch (err) {
       if (attempt < retries) {
-        console.warn(`  [s3 upload] 第 ${attempt + 1} 次失败，3s 后重试: ${err.message}`)
-        await new Promise(r => setTimeout(r, 3000))
+        const delayMs = 3000 * (attempt + 1)
+        console.warn(`  [s3 upload] 第 ${attempt + 1} 次失败，${Math.round(delayMs / 1000)}s 后重试: ${err.message}`)
+        await new Promise(r => setTimeout(r, delayMs))
       } else {
         throw err
       }

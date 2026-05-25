@@ -38,6 +38,37 @@ pool.on('error', (err) => {
   console.error('[DB] pg pool error:', err.message)
 })
 
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+function isTransientDbError(err) {
+  const message = err?.message || ''
+  const code = err?.code || ''
+  return (
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT' ||
+    code === '57P01' ||
+    /Connection terminated|timeout|ECONNRESET|ETIMEDOUT|connection/i.test(message)
+  )
+}
+
+async function queryWithTransientRetry(sql, params, { label = 'query', attempts = 3 } = {}) {
+  let lastError
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await pool.query(sql, params)
+    } catch (err) {
+      lastError = err
+      const shouldRetry = attempt < attempts - 1 && isTransientDbError(err)
+      if (!shouldRetry) throw err
+
+      const delayMs = 500 * (attempt + 1)
+      console.warn(`[DB] ${label} transient error, retry ${attempt + 1}/${attempts - 1} after ${delayMs}ms: ${err.message}`)
+      await sleep(delayMs)
+    }
+  }
+  throw lastError
+}
+
 // ===== 初始化（建表 + 迁移 + 清僵尸）=====
 // server.js 启动时 await initDb()
 export async function initDb() {
@@ -269,7 +300,7 @@ export async function saveJob(job) {
     full_data: JSON.stringify(job),
   }
 
-  await pool.query(`
+  const sql = `
     INSERT INTO jobs (
       job_id, status, step, step_label,
       product_id, reference_video_url, reference_video_author, category,
@@ -290,7 +321,8 @@ export async function saveJob(job) {
       gemini_pass1_ms=$18, gemini_pass2_ms=$19, gemini_review_ms=$20,
       seedance_ms=$21, total_ms=$22,
       error_message=$23, full_data=$24
-  `, [
+  `
+  const params = [
     vals.job_id, vals.status, vals.step, vals.step_label,
     vals.product_id, vals.reference_video_url, vals.reference_video_author, vals.category,
     vals.is_same_product, vals.duration, vals.resolution, vals.batch_count,
@@ -299,7 +331,9 @@ export async function saveJob(job) {
     vals.gemini_pass1_ms, vals.gemini_pass2_ms, vals.gemini_review_ms,
     vals.seedance_ms, vals.total_ms,
     vals.error_message, vals.full_data,
-  ])
+  ]
+
+  await queryWithTransientRetry(sql, params, { label: 'saveJob' })
 }
 
 export async function getJob(jobId) {

@@ -10,11 +10,14 @@ import { analyzeAndGeneratePrompt, SEEDANCE_MANDATORY_BLOCKS, VARIANT_RECIPES } 
 import { validateGeminiOutput, formatValidationReport } from '../services/prompt-validator.js'
 import { reviewPrompt, reviseGeminiOutput, formatReviewReport, clearImageCache } from '../services/gemini-review.js'
 import { saveJob, getJob, listJobs, countJobs, countJobsByProduct, saveVideo, updateVideoJudge, updateVideoDiffJudge, updateVideoUrl, getVideosByJob, markVideoPublished } from '../services/db.js'
-import { S3_ENABLED, uploadUrlToS3, uploadVideoAndPosterFromUrl } from '../services/s3-upload.js'
+import { S3_ENABLED, uploadUrlToS3, uploadVideoAndPosterFromUrl, generatePosterForExistingVideo } from '../services/s3-upload.js'
 import { judgeGeneratedVideo, judgeNarrativeDifferentiation } from '../services/gemini-video-judge.js'
 import { uploadMediaFiles, uploadMediaFile } from '../services/media-upload.js'
-import { createBatchTasks, getTaskStatus, parseTaskResult } from '../services/kieai.js'
+import { createBatchTasks, createVideoTask, getTaskStatus, parseTaskResult } from '../services/kieai.js'
 import { getTikTokPlaybackUrl } from '../services/snaptik.js'
+import { buildAgenticSegmentPlan, summarizeSegmentPlan } from '../services/agentic-planner.js'
+import { buildAgenticSegmentPrompt } from '../services/agentic-prompt-builder.js'
+import { extractLastFrame, stitchSegments } from '../services/agentic-stitcher.js'
 
 // 用 ffprobe 探测视频实际时长（秒，浮点数）
 function ffprobeDuration(filePath) {
@@ -152,6 +155,263 @@ async function cleanupFiles(files) {
   }
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function downloadFileToPath(sourceUrl, outPath) {
+  const response = await axios.get(sourceUrl, {
+    responseType: 'arraybuffer',
+    timeout: 120000,
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+  })
+  await writeFile(outPath, response.data)
+}
+
+async function persistVideosForJob(jobId, job, videos) {
+  for (const video of videos) {
+    try {
+      await saveVideo({
+        videoId: video.taskId,
+        jobId,
+        videoUrl: video.videoUrl,
+        posterUrl: video.posterUrl,
+        prompt: video.prompt || job.geminiResult?.seedance_prompt,
+        compressedScript: job.geminiResult?.compressed_script,
+        productVisualFeatures: job.geminiResult?.product_visual_features,
+        selectedImageIndices: job.geminiResult?.selected_image_indices,
+        selectedImageUrls: job.geminiResult?.selected_image_urls,
+        dominantColor: job.geminiResult?.dominant_color,
+        reviewScore: job.reviewReport?.score,
+        reviewPass: job.reviewReport?.pass,
+        reviewIssues: job.reviewReport?.issues,
+        narrativeDna: job.geminiResult?.narrative_dna,
+      })
+    } catch (e) {
+      console.warn(`[${jobId}] 保存 video 表失败（不阻塞）: ${e.message}`)
+    }
+  }
+}
+
+function queueVideoJudges(jobId, job, videos) {
+  setImmediate(async () => {
+    for (const video of videos) {
+      try {
+        console.log(`[${jobId}] 🔍 调用 Gemini 评分视频 ${video.taskId}...`)
+        const judge = await judgeGeneratedVideo({
+          generatedVideoUrl: video.videoUrl,
+          productInfo: job.geminiResult?.product_visual_features,
+          prompt: video.prompt || job.geminiResult?.seedance_prompt,
+          referenceImageUrls: job.geminiResult?.selected_image_urls || [],
+        })
+        if (judge) {
+          await updateVideoJudge(video.taskId, judge)
+          console.log(`[${jobId}] ✅ 视频评分完成：${judge.overall}/10 — ${judge.verdict}`)
+        }
+        const benchmarkUrl = job.resolvedReferenceVideoUrl || job.referenceVideoUrl
+        if (benchmarkUrl) {
+          console.log(`[${jobId}] 🔍 与标杆视频对比差异化（用 ${job.resolvedReferenceVideoUrl ? 'snaptik 直链' : 'raw URL'}）...`)
+          try {
+            const diff = await judgeNarrativeDifferentiation({
+              generatedVideoUrl: video.videoUrl,
+              benchmarkVideoUrl: benchmarkUrl,
+            })
+            if (diff) {
+              await updateVideoDiffJudge(video.taskId, diff)
+              console.log(`[${jobId}] ✅ 差异化评分：${diff.overall_differentiation}/10 — ${diff.verdict}`)
+            }
+          } catch (e) {
+            console.warn(`[${jobId}] 差异化评分失败（跳过）: ${e.message}`)
+          }
+        }
+      } catch (e) {
+        console.warn(`[${jobId}] 视频评分失败（跳过）: ${e.message}`)
+      }
+    }
+  })
+}
+
+async function waitForTaskCompletion({ jobId, taskId, onUpdate, pollMs = 15000, maxAttempts = 80 }) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const raw = await getTaskStatus(taskId)
+      const parsed = parseTaskResult(raw)
+      if (onUpdate) await onUpdate(parsed)
+      if (parsed.state === 'success' || parsed.state === 'fail') return parsed
+    } catch (e) {
+      console.warn(`[${jobId}] Agent 轮询异常（继续重试）${taskId}: ${e.message}`)
+    }
+    await sleep(pollMs)
+  }
+  throw new Error(`任务 ${taskId} 轮询超时`)
+}
+
+async function runAgenticGeneration({
+  job,
+  jobId,
+  geminiResult,
+  finalPrompt,
+  referenceImageUrls,
+  referenceVideoUrls,
+  resolution,
+  duration,
+  allFiles,
+  setStep,
+}) {
+  const plan = buildAgenticSegmentPlan({
+    targetDuration: duration,
+    compressedScript: geminiResult.compressed_script,
+    productVisualFeatures: geminiResult.product_visual_features,
+    dominantColor: geminiResult.dominant_color,
+  })
+
+  job.agentPlan = plan
+  job.agentPlanSummary = summarizeSegmentPlan(plan)
+  job.tasks = []
+  job.taskStatuses = plan.segments.map(segment => ({
+    taskId: null,
+    state: 'waiting',
+    progress: 0,
+    failMsg: '',
+    segmentIndex: segment.index,
+    role: segment.role,
+  }))
+  await saveJob(job)
+
+  const segmentArtifacts = []
+  let firstFrameUrl = ''
+
+  for (const segment of plan.segments) {
+    const taskIndex = segment.index - 1
+    setStep(3, `Agent 生成第 ${segment.index}/${plan.segments.length} 段（${segment.role}）`)
+
+    const segmentPrompt = buildAgenticSegmentPrompt({
+      basePrompt: finalPrompt,
+      segment,
+      plan,
+    })
+
+    const task = await createVideoTask({
+      prompt: segmentPrompt,
+      referenceImageUrls,
+      referenceVideoUrls: segment.seedanceMode === 'multimodal_reference' ? referenceVideoUrls : [],
+      firstFrameUrl: segment.seedanceMode === 'first_frame_continue' ? firstFrameUrl : '',
+      resolution,
+      duration: segment.duration,
+      aspectRatio: '9:16',
+      returnLastFrame: !!segment.returnLastFrame,
+      generateAudio: plan.segments.length === 1,
+    })
+
+    job.taskStatuses[taskIndex] = {
+      ...job.taskStatuses[taskIndex],
+      taskId: task.taskId,
+      state: 'queuing',
+      progress: 0,
+      failMsg: '',
+    }
+    job.tasks[taskIndex] = {
+      taskId: task.taskId,
+      segmentIndex: segment.index,
+      role: segment.role,
+      seedanceMode: segment.seedanceMode,
+      prompt: segmentPrompt,
+      duration: segment.duration,
+    }
+    await saveJob(job)
+
+    const parsed = await waitForTaskCompletion({
+      jobId,
+      taskId: task.taskId,
+      onUpdate: async (status) => {
+        job.taskStatuses[taskIndex] = {
+          ...job.taskStatuses[taskIndex],
+          taskId: task.taskId,
+          state: status.state,
+          progress: status.progress ?? null,
+          failMsg: status.failMsg || '',
+        }
+        await saveJob(job)
+      },
+    })
+
+    if (parsed.state !== 'success' || !parsed.videoUrl) {
+      throw new Error(parsed.failMsg || `第 ${segment.index} 段生成失败`)
+    }
+
+    const segmentVideoPath = path.join(os.tmpdir(), `${uuidv4()}-agent-segment-${segment.index}.mp4`)
+    await downloadFileToPath(parsed.videoUrl, segmentVideoPath)
+    allFiles.push({ path: segmentVideoPath })
+
+    let handoffFrameUrl = ''
+    if (segment.returnLastFrame) {
+      handoffFrameUrl = parsed.lastFrameUrl || ''
+      if (!handoffFrameUrl) {
+        const framePath = path.join(os.tmpdir(), `${uuidv4()}-agent-segment-${segment.index}-last.jpg`)
+        await extractLastFrame(segmentVideoPath, framePath)
+        allFiles.push({ path: framePath })
+        handoffFrameUrl = await uploadMediaFile(framePath, `agent-segment-${segment.index}-last.jpg`)
+      }
+      firstFrameUrl = handoffFrameUrl
+    }
+
+    segmentArtifacts.push({
+      index: segment.index,
+      role: segment.role,
+      taskId: task.taskId,
+      prompt: segmentPrompt,
+      rawVideoUrl: parsed.videoUrl,
+      localVideoPath: segmentVideoPath,
+      handoffFrameUrl,
+    })
+
+    job.taskStatuses[taskIndex] = {
+      ...job.taskStatuses[taskIndex],
+      taskId: task.taskId,
+      state: 'success',
+      progress: 100,
+      failMsg: '',
+    }
+    job.agentSegments = segmentArtifacts.map(artifact => ({
+      index: artifact.index,
+      role: artifact.role,
+      taskId: artifact.taskId,
+      videoUrl: artifact.rawVideoUrl,
+      handoffFrameUrl: artifact.handoffFrameUrl,
+    }))
+    await saveJob(job)
+  }
+
+  let finalVideoPath = segmentArtifacts[0].localVideoPath
+  if (segmentArtifacts.length > 1) {
+    setStep(3, '拼接 Agent 分段视频')
+    finalVideoPath = path.join(os.tmpdir(), `${uuidv4()}-agent-final.mp4`)
+    await stitchSegments(segmentArtifacts.map(segment => segment.localVideoPath), finalVideoPath)
+    allFiles.push({ path: finalVideoPath })
+  }
+
+  const finalVideoUrl = await uploadMediaFile(finalVideoPath, `${jobId}-agent-final.mp4`)
+  let posterUrl = null
+  if (S3_ENABLED) {
+    try {
+      posterUrl = await generatePosterForExistingVideo(finalVideoUrl, `${jobId}-agent-final`)
+    } catch (e) {
+      console.warn(`[${jobId}] Agent 最终视频 poster 生成失败（跳过）: ${e.message}`)
+    }
+  }
+
+  return {
+    plan,
+    segmentArtifacts,
+    finalVideo: {
+      taskId: `${jobId}-agent-final`,
+      videoUrl: finalVideoUrl,
+      posterUrl,
+      prompt: finalPrompt,
+    },
+  }
+}
+
 // POST /api/generate
 router.post('/', upload.fields([
   { name: 'referenceVideo', maxCount: 1 },
@@ -169,6 +429,7 @@ router.post('/', upload.fields([
     const category = req.body.category || 'general'
     const productInfo = req.body.productInfo ? JSON.parse(req.body.productInfo) : null
     const mode = req.body.mode === 'before-after' ? 'before-after' : 'normal'  // before-after 模板模式
+    const generationMode = req.body.generationMode === 'agentic_segments' ? 'agentic_segments' : 'single_pass'
     // isSameProduct 在 normal 和 before-after 模式下同义：before-after 后半段就是 normal 流程，
     // 同产品=用参考视频真实台词，不同产品=台词全新写
     const isSameProduct = req.body.isSameProduct !== '0'
@@ -225,7 +486,7 @@ router.post('/', upload.fields([
       referenceVideoUrl: tiktokVideoUrl || null,
       referenceVideoAuthor: extractTikTokAuthor(tiktokVideoUrl),
       category, isSameProduct, duration, resolution,
-      batchCount, userDescription, variantSeed,
+      batchCount, userDescription, variantSeed, generationMode,
     }
     saveJob(global.jobStore[jobId]).catch(e => console.warn('[DB] saveJob error:', e.message))
 
@@ -265,7 +526,9 @@ router.post('/', upload.fields([
         console.log(`[${jobId}] 使用商品链接图片，跳过上传`)
       }
 
-      setStep(1, 'Gemini 分析参考视频 + 筛选图片 + 生成提示词')
+      setStep(1, generationMode === 'agentic_segments'
+        ? 'Gemini 分析参考视频 + 筛选图片 + 生成 Agent 基础提示词'
+        : 'Gemini 分析参考视频 + 筛选图片 + 生成提示词')
       console.log(`[${jobId}] variantSeed=${variantSeed ?? '无'}`)
       const geminiResult = await analyzeAndGeneratePrompt({
         videoFilePath: referenceVideoFile?.path,
@@ -288,21 +551,25 @@ router.post('/', upload.fields([
       if (remoteToUpload.length > 0) {
         setStep(2, `上传选中的 ${remoteToUpload.length} 张商品链接图到 S3`)
         for (const item of remoteToUpload) {
+          let tmpPath = null
           try {
-            const tmpPath = path.join(os.tmpdir(), `${uuidv4()}.jpg`)
+            tmpPath = path.join(os.tmpdir(), `${uuidv4()}.jpg`)
             const dl = await axios.get(item.sourceUrl, { responseType: 'arraybuffer', timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0' } })
             await writeFile(tmpPath, dl.data)
             const uploadedUrl = await uploadMediaFile(tmpPath, 'product.jpg')
             item.publicUrl = uploadedUrl
-            await unlink(tmpPath).catch(() => {})
           } catch (e) {
-            console.warn(`[${jobId}] 远程图上传失败（跳过）: ${e.message}`)
+            item.publicUrl = item.sourceUrl
+            item.publicUrlFallback = 'source_url'
+            console.warn(`[${jobId}] 远程图上传 S3 失败，回退用原始商品图 URL: ${e.message}`)
+          } finally {
+            if (tmpPath) await unlink(tmpPath).catch(() => {})
           }
         }
       }
       // 重新汇总最终的 reference_image_urls
       const finalReferenceImageUrls = (geminiResult.selected_images || [])
-        .map(s => s.publicUrl)
+        .map(s => s.publicUrl || s.sourceUrl)
         .filter(Boolean)
       taskImageUrls.push(...finalReferenceImageUrls)
       console.log(`[${jobId}] Seedance 引用图: ${finalReferenceImageUrls.length} 张`)
@@ -330,11 +597,14 @@ router.post('/', upload.fields([
         if (srcVideoPath) {
           setStep(2, `截取参考视频片段 [${segStart}s-${segEnd}s] 并上传到 S3`)
           const clipPath = path.join(os.tmpdir(), `${uuidv4()}-clip.mp4`)
-          await ffmpegClip(srcVideoPath, segStart, segEnd, clipPath)
-          const clipUrl = await uploadMediaFile(clipPath, 'reference-clip.mp4')
-          referenceVideoUrls = [clipUrl]
-          await unlink(clipPath).catch(() => {})
-          console.log(`[${jobId}] 参考视频片段已上传: ${clipUrl}`)
+          try {
+            await ffmpegClip(srcVideoPath, segStart, segEnd, clipPath)
+            const clipUrl = await uploadMediaFile(clipPath, 'reference-clip.mp4')
+            referenceVideoUrls = [clipUrl]
+            console.log(`[${jobId}] 参考视频片段已上传: ${clipUrl}`)
+          } finally {
+            await unlink(clipPath).catch(() => {})
+          }
         }
       } catch (e) {
         console.warn(`[${jobId}] 参考视频处理失败（跳过 reference_video）: ${e.message}`)
@@ -462,23 +732,49 @@ ONE PERSON across the entire video — same face, hair, makeup, body in every fr
       const blockCount = 8 + (dominantColor ? 1 : 0) + (featuresSummary ? 1 : 0) + 1
       console.log(`[${jobId}] 已注入 ${blockCount} 个块${dominantColor ? `（含 COLOR LOCK = ${dominantColor}）` : ''}，prompt 总长 ${finalPrompt.length} 字符`)
 
-      setStep(2, `创建 ${batchCount} 个 Seedance 生成任务`)
-      const tasks = await createBatchTasks({
-        prompt: finalPrompt,
-        referenceImageUrls: finalReferenceImageUrls,
-        referenceVideoUrls,
-        resolution,
-        duration,
-        aspectRatio: '9:16',
-        count: batchCount,
-      })
-      console.log(`[${jobId}] 任务已创建:`, tasks.map(t => t.taskId))
-
-      job.status = 'pending'
       job.geminiResult = geminiResult
       job.referenceVideoUrls = referenceVideoUrls   // 持久化，供 retry-kie 复用
-      job.tasks = tasks
-      setStep(3, 'Seedance 生成中，请耐心等待')
+
+      if (generationMode === 'agentic_segments') {
+        setStep(2, 'Agent Planner 生成分段计划')
+        const agentResult = await runAgenticGeneration({
+          job,
+          jobId,
+          geminiResult,
+          finalPrompt,
+          referenceImageUrls: finalReferenceImageUrls,
+          referenceVideoUrls,
+          resolution,
+          duration,
+          allFiles,
+          setStep,
+        })
+
+        job.status = 'completed'
+        job.completedAt = Date.now()
+        if (job.startedAt) job.totalMs = job.completedAt - job.startedAt
+        job.videos = [agentResult.finalVideo]
+        await persistVideosForJob(job.jobId, job, job.videos)
+        queueVideoJudges(jobId, job, job.videos)
+        console.log(`[${jobId}] ✅ Agent 模式完成，最终视频: ${agentResult.finalVideo.videoUrl}`)
+        await saveJob(job)
+      } else {
+        setStep(2, `创建 ${batchCount} 个 Seedance 生成任务`)
+        const tasks = await createBatchTasks({
+          prompt: finalPrompt,
+          referenceImageUrls: finalReferenceImageUrls,
+          referenceVideoUrls,
+          resolution,
+          duration,
+          aspectRatio: '9:16',
+          count: batchCount,
+        })
+        console.log(`[${jobId}] 任务已创建:`, tasks.map(t => t.taskId))
+
+        job.status = 'pending'
+        job.tasks = tasks
+        setStep(3, 'Seedance 生成中，请耐心等待')
+      }
 
     } catch (err) {
       console.error(`[${jobId}] Pipeline error:`, err)
@@ -509,6 +805,9 @@ router.post('/retry-kie/:jobId', async (req, res) => {
     if (job) { global.jobStore = global.jobStore || {}; global.jobStore[jobId] = job }
   }
   if (!job) return res.status(404).json({ error: 'Job not found' })
+  if (job.generationMode === 'agentic_segments') {
+    return res.status(400).json({ error: 'Agent 分段任务暂不支持 retry-kie，请使用完整流程重试' })
+  }
   if (!job.geminiResult?.seedance_prompt) return res.status(400).json({ error: '没有 geminiResult，请整体重试' })
   if (!job.tasks?.length) return res.status(400).json({ error: '没有 kie 任务记录，请整体重试' })
 
@@ -642,68 +941,8 @@ router.get('/status/:jobId', async (req, res) => {
       if (videos.length > 0) {
         console.log(`[${jobId}] ✅ 所有任务完成，视频数: ${videos.length}`)
         videos.forEach(v => console.log(`[${jobId}]    🎬 ${v.videoUrl}`))
-        // 把每条生成的视频写到 videos 表（便于后续投流数据导入和分析）
-        for (const v of videos) {
-          try {
-            await saveVideo({
-              videoId: v.taskId,
-              jobId: job.jobId,
-              videoUrl: v.videoUrl,
-              posterUrl: v.posterUrl,
-              prompt: job.geminiResult?.seedance_prompt,
-              compressedScript: job.geminiResult?.compressed_script,
-              productVisualFeatures: job.geminiResult?.product_visual_features,
-              selectedImageIndices: job.geminiResult?.selected_image_indices,
-              selectedImageUrls: job.geminiResult?.selected_image_urls,
-              dominantColor: job.geminiResult?.dominant_color,
-              reviewScore: job.reviewReport?.score,
-              reviewPass: job.reviewReport?.pass,
-              reviewIssues: job.reviewReport?.issues,
-              narrativeDna: job.geminiResult?.narrative_dna,
-            })
-          } catch (e) {
-            console.warn(`[${jobId}] 保存 video 表失败（不阻塞）: ${e.message}`)
-          }
-        }
-        // 异步评分：让 Gemini 看完生成的视频后给出多维度评分（不阻塞前端响应）
-        // 用 setImmediate 保证主流程立即结束
-        setImmediate(async () => {
-          for (const v of videos) {
-            try {
-              console.log(`[${jobId}] 🔍 调用 Gemini 评分视频 ${v.taskId}...`)
-              const judge = await judgeGeneratedVideo({
-                generatedVideoUrl: v.videoUrl,
-                productInfo: job.geminiResult?.product_visual_features,
-                prompt: job.geminiResult?.seedance_prompt,
-                referenceImageUrls: job.geminiResult?.selected_image_urls || [],
-              })
-              if (judge) {
-                await updateVideoJudge(v.taskId, judge)
-                console.log(`[${jobId}] ✅ 视频评分完成：${judge.overall}/10 — ${judge.verdict}`)
-              }
-              // 如果有标杆参考视频，再做差异化评分
-              // 优先用 snaptik 解析后的直链（Gemini 下不动 TikTok 原链），否则 fallback 到 raw URL
-              const benchmarkUrl = job.resolvedReferenceVideoUrl || job.referenceVideoUrl
-              if (benchmarkUrl) {
-                console.log(`[${jobId}] 🔍 与标杆视频对比差异化（用 ${job.resolvedReferenceVideoUrl ? 'snaptik 直链' : 'raw URL'}）...`)
-                try {
-                  const diff = await judgeNarrativeDifferentiation({
-                    generatedVideoUrl: v.videoUrl,
-                    benchmarkVideoUrl: benchmarkUrl,
-                  })
-                  if (diff) {
-                    await updateVideoDiffJudge(v.taskId, diff)
-                    console.log(`[${jobId}] ✅ 差异化评分：${diff.overall_differentiation}/10 — ${diff.verdict}`)
-                  }
-                } catch (e) {
-                  console.warn(`[${jobId}] 差异化评分失败（跳过）: ${e.message}`)
-                }
-              }
-            } catch (e) {
-              console.warn(`[${jobId}] 视频评分失败（跳过）: ${e.message}`)
-            }
-          }
-        })
+        await persistVideosForJob(job.jobId, job, videos)
+        queueVideoJudges(jobId, job, videos)
       } else {
         console.error(`[${jobId}] ❌ 所有任务均失败`)
       }
@@ -721,6 +960,8 @@ router.get('/status/:jobId', async (req, res) => {
     videos: job.videos || [],
     tasks: (job.taskStatuses || []).map(t => ({
       taskId: t.taskId,
+      role: t.role,
+      segmentIndex: t.segmentIndex,
       state: t.state,
       progress: t.progress,
       failMsg: t.failMsg,
@@ -731,6 +972,8 @@ router.get('/status/:jobId', async (req, res) => {
     reasoning: job.geminiResult?.reasoning,
     reviewReport: job.reviewReport,
     taskCount: job.tasks?.length || 0,
+    generationMode: job.generationMode || 'single_pass',
+    retryKieSupported: (job.generationMode || 'single_pass') !== 'agentic_segments' && (job.tasks?.length || 0) > 0,
     error: job.error,
   })
 })

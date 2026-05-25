@@ -1,6 +1,6 @@
 # 项目当前状态总览
 
-> 最后更新：2026-05-21 — + before-after 模板模式 + before/after 概念助手 + 模板库 + 全链路 Gemini 重试
+> 最后更新：2026-05-25 — + Agent 分段生成模式设计文档（见 `docs/AGENTIC_SEGMENT_GENERATION_PLAN.md`）
 > 用途：记录当前项目架构、生成模式、已知问题、关键决策
 
 ---

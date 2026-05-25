@@ -129,6 +129,7 @@ export default function App() {
   const [batchCount, setBatchCount] = useState(1)
   const [resolution, setResolution] = useState('480p')
   const [duration, setDuration] = useState(15)
+  const [generationMode, setGenerationMode] = useState('single_pass')  // 'single_pass' | 'agentic_segments'
   // VARIANT: 同一标杆视频的裂变配方（不同模特+场景），null=不指定
   const [variantSeed, setVariantSeed] = useState(null)
   const [variants, setVariants] = useState([])
@@ -373,7 +374,8 @@ export default function App() {
     fd.append('category', category)
     if (productInfo) fd.append('productInfo', JSON.stringify(productInfo))
     fd.append('isSameProduct', isSameProduct ? '1' : '0')
-    fd.append('batchCount', batchCount)
+    fd.append('batchCount', generationMode === 'agentic_segments' ? 1 : batchCount)
+    fd.append('generationMode', generationMode)
     if (variantSeed) fd.append('variantSeed', variantSeed)
     if (skipReferenceVideo) fd.append('skipReferenceVideo', '1')
     if (beforeAfterMode) fd.append('mode', 'before-after')
@@ -426,6 +428,7 @@ export default function App() {
     setProductUrl(''); setProductInfo(null); setProductId(null); setProductError(null); setIsSameProduct(true)
     setProductSkuColor(''); setProductColorInventory(null); setProductAllImages(null)
     setBenchmarkVideos([]); setShowBenchmarks(false)
+    setGenerationMode('single_pass')
     setVariantSeed(null)
     setJobId(null); setJobStatus(null); setLoading(false)
     setCurrentStep(-1); setError(null); setWaitSec(0); setCategory('lingerie')
@@ -896,6 +899,43 @@ export default function App() {
         {/* 生成设置 */}
         <div style={s.card}>
           <div style={s.cardTitle}>生成设置</div>
+          <div style={{ marginBottom: 14, padding: 12, background: generationMode === 'agentic_segments' ? '#eff6ff' : '#f9fafb', borderRadius: 8, border: '1px solid', borderColor: generationMode === 'agentic_segments' ? '#93c5fd' : '#e5e7eb' }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#1f2937', marginBottom: 8 }}>生成模式</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                onClick={() => setGenerationMode('single_pass')}
+                style={{
+                  padding: '8px 10px', fontSize: 12, border: '2px solid', borderColor: generationMode === 'single_pass' ? '#6366f1' : '#e5e7eb',
+                  borderRadius: 6, background: generationMode === 'single_pass' ? '#eef2ff' : '#fff',
+                  cursor: 'pointer', textAlign: 'left',
+                  fontWeight: generationMode === 'single_pass' ? 600 : 400, color: generationMode === 'single_pass' ? '#4338ca' : '#374151',
+                }}>
+                传统单段<br/>
+                <span style={{ fontSize: 10, fontWeight: 400, color: generationMode === 'single_pass' ? '#6366f1' : '#9ca3af' }}>
+                  1 次 Seedance 直接生成整条视频
+                </span>
+              </button>
+              <button
+                onClick={() => setGenerationMode('agentic_segments')}
+                style={{
+                  padding: '8px 10px', fontSize: 12, border: '2px solid', borderColor: generationMode === 'agentic_segments' ? '#2563eb' : '#e5e7eb',
+                  borderRadius: 6, background: generationMode === 'agentic_segments' ? '#dbeafe' : '#fff',
+                  cursor: 'pointer', textAlign: 'left',
+                  fontWeight: generationMode === 'agentic_segments' ? 600 : 400, color: generationMode === 'agentic_segments' ? '#1d4ed8' : '#374151',
+                }}>
+                Agent 分段实验<br/>
+                <span style={{ fontSize: 10, fontWeight: 400, color: generationMode === 'agentic_segments' ? '#2563eb' : '#9ca3af' }}>
+                  10s 以上优先拆成 2 段，当前成片不带音频
+                </span>
+              </button>
+            </div>
+            {generationMode === 'agentic_segments' && (
+              <div style={{ fontSize: 11, color: '#1d4ed8', marginTop: 8 }}>
+                首段用参考图 + 参考视频建立风格，后段用上一段末帧续写；若总时长小于 10 秒，会自动回退成 1 段实验视频。
+              </div>
+            )}
+          </div>
+
           <div style={s.row}>
             <div style={s.field}>
               <label style={s.label}>产品品类</label>
@@ -905,7 +945,7 @@ export default function App() {
             </div>
             <div style={s.field}>
               <label style={s.label}>批量数量</label>
-              <select style={s.select} value={batchCount} onChange={e => setBatchCount(Number(e.target.value))}>
+              <select style={{ ...s.select, opacity: generationMode === 'agentic_segments' ? 0.6 : 1 }} value={generationMode === 'agentic_segments' ? 1 : batchCount} onChange={e => setBatchCount(Number(e.target.value))} disabled={generationMode === 'agentic_segments'}>
                 {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n} 个视频</option>)}
               </select>
             </div>
@@ -991,10 +1031,10 @@ export default function App() {
           <button style={s.btnPrimary(submitDisabled)} onClick={handleSubmit} disabled={submitDisabled}>
             {loading ? '生成中…' : '🚀 开始生成'}
           </button>
-          {jobStatus?.status === 'failed' && !loading && (jobStatus?.taskCount ?? 0) > 0 && (
+          {jobStatus?.status === 'failed' && !loading && jobStatus?.retryKieSupported && (
             <button style={{ ...s.btnGhost, background: '#fef2f2', borderColor: '#fca5a5', color: '#b91c1c' }} onClick={handleRetryKie}>🔄 重试 kie</button>
           )}
-          {jobStatus?.status === 'failed' && !loading && (jobStatus?.taskCount ?? 0) === 0 && (
+          {jobStatus?.status === 'failed' && !loading && !jobStatus?.retryKieSupported && (
             <button style={{ ...s.btnGhost, background: '#fef2f2', borderColor: '#fca5a5', color: '#b91c1c' }} onClick={handleSubmit}>🔄 重试（完整流程）</button>
           )}
           {(jobId || error) && !loading && (
@@ -1066,13 +1106,13 @@ export default function App() {
               <span style={s.pill(jobStatus.status)}>
                 {jobStatus.status === 'completed' ? '✅ 完成' : jobStatus.status === 'failed' ? '❌ 失败' : '⏳ 生成中'}
               </span>
-              {jobStatus.status === 'failed' && (jobStatus.taskCount ?? 0) > 0 && (
+              {jobStatus.status === 'failed' && jobStatus.retryKieSupported && (
                 <button
                   style={{ padding: '3px 12px', borderRadius: 6, border: '1px solid #fca5a5', background: '#fef2f2', color: '#b91c1c', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
                   onClick={handleRetryKie}
                 >🔄 重试 kie</button>
               )}
-              {jobStatus.status === 'failed' && (jobStatus.taskCount ?? 0) === 0 && (
+              {jobStatus.status === 'failed' && !jobStatus.retryKieSupported && (
                 <button
                   style={{ padding: '3px 12px', borderRadius: 6, border: '1px solid #fca5a5', background: '#fef2f2', color: '#b91c1c', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
                   onClick={handleSubmit}
@@ -1107,12 +1147,12 @@ export default function App() {
             )}
 
             {/* 等待中的任务状态 */}
-            {jobStatus.status === 'pending' && jobStatus.tasks?.length > 0 && (
+            {jobStatus.status !== 'completed' && jobStatus.tasks?.length > 0 && (
               <div style={{ marginBottom: 16, padding: 12, background: '#f8f9ff', borderRadius: 8 }}>
                 <div style={{ fontSize: 13, color: '#555', marginBottom: 6 }}>⏳ 已等待 {fmtTime(waitSec)}，每 15 秒自动刷新</div>
                 {jobStatus.tasks.map((t, i) => (
                   <div key={i} style={{ fontSize: 13, color: t.state === 'fail' ? '#dc2626' : '#6366f1', marginTop: 4 }}>
-                    任务 {i + 1}：<strong>{t.state}</strong>
+                    任务 {t.segmentIndex || i + 1}{t.role ? ` · ${t.role}` : ''}：<strong>{t.state}</strong>
                     {t.progress != null && ` · ${t.progress}%`}
                     {t.failMsg && ` · ${t.failMsg}`}
                   </div>
