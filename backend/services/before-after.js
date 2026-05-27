@@ -155,7 +155,13 @@ ${ideaBlock}
 3. before 和 after 各自必须能被描述成「一张静止画面」。
 4. 对比点要单一、明确、夸张可见（例如：领口处有没有露出 bra 边缘 / 上衣表面有没有杯型轮廓凸起 / 肩带有没有从衣服里滑出来）。
 
-任务：${idea ? '严格围绕用户上面的想法/方向' : '基于选中的卖点'}，生成 3 个不同角度的 before/after 视频概念。${idea ? '注意：3 个概念不能偏离用户的方向，差异只体现在「半秒可辨的对比点」选取上。' : ''}
+任务：${idea ? '严格围绕用户上面的想法/方向' : '严格围绕用户选中的卖点'}，生成 before/after 视频概念。
+
+【数量与范围 —— 重要】
+- 不要凑数。有几个真正成立、彼此不同的 before/after 角度，就生成几个，1 到 4 个都可以。宁可只给 1 个扎实的，也不要为凑数注水出弱概念。
+- 所有概念**只能**围绕上面列出的「用户选中的卖点」。绝对不许使用用户没有选中的卖点、或商品的其他特点（即使商品确实具备）。
+- 如果只选了 1 个卖点、而这个卖点本身只撑得起 1-2 个角度，那就只给 1-2 个。概念之间靠「换外层衣服 / 换机位 / 换可见缺陷的呈现方式」区分，而不是靠换一个卖点。
+${idea ? '- 概念不能偏离用户的想法/方向。' : ''}
 每个概念包含：
 - hook：一句话概括这个「半秒可辨」的对比点
 - before：用旧内衣时那一帧静止画面长什么样（写清机位、姿势、外层衣服、那个可见缺陷）
@@ -167,9 +173,9 @@ ${ideaBlock}
   · 必须确保 after 帧里出现的是本商品本身
   · 60-100 字，口语化但信息密度高
 
-3 个概念的「对比点」要各不相同，但都必须满足「半秒可辨」。
+每个概念都必须满足「半秒可辨」，且严格落在选中的卖点范围内。
 
-只返回 JSON，不要 markdown 代码块：
+只返回 JSON，不要 markdown 代码块（concepts 数组长度 1-4，取决于真正成立的角度数）：
 {
   "concepts": [
     { "hook": "...", "before": "...", "after": "...", "supplement": "..." }
@@ -184,7 +190,7 @@ ${ideaBlock}
   const text = response.candidates?.[0]?.content?.parts?.[0]?.text || ''
   const parsed = parseJsonLoose(text, '生成概念')
   const list = Array.isArray(parsed.concepts) ? parsed.concepts : []
-  return list.slice(0, 3).map((c, i) => ({
+  return list.slice(0, 4).map((c, i) => ({
     id: `concept_${i}`,
     hook: String(c.hook || '').trim(),
     before: String(c.before || '').trim(),

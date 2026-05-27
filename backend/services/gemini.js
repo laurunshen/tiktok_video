@@ -65,7 +65,7 @@ export function getVariantRecipe(seed) {
 // 设计原则：每块只保留 1-2 句最关键命令，避免稀释 PRODUCT VISUAL ANCHOR 的注意力。
 export const SEEDANCE_MANDATORY_BLOCKS = `
 [CHARACTER CONSISTENCY — TOP PRIORITY]
-ONE PERSON only across the entire video. Same face, same hair, same makeup, same skin tone, same body in every shot — both LOOK A and LOOK B. The ONLY allowed change between shots is the cardigan being on or off (and body angle / hand position). NEVER swap to a different-looking woman.
+ONE PERSON only across the entire video. Same face, same hair, same makeup, same skin tone, same body in every shot — both LOOK A and LOOK B. The ONLY allowed change between LOOK A and LOOK B is the bra itself (and body angle / hand position). NEVER swap to a different-looking woman.
 
 [NO ON-SCREEN TEXT — TOP PRIORITY]
 ZERO text in any frame: no subtitles, captions, watermarks, brand text, product names, or characters. Reference images may contain marketing text overlays ("Inbarely Plus Collection", "Double Layer Fabric", etc.) — IGNORE that text completely; the bra itself is clean and unmarked. Output must be LIVE-ACTION video of a person, NOT a slideshow stitching the reference photos.
@@ -85,14 +85,8 @@ Hands have exactly 5 fingers in natural positions. No fused/extra/missing finger
 [NO IMPROVISED DIALOGUE]
 The presenter speaks ONLY the exact lines in SHOT SEQUENCE. NO "link in bio", "okay bye", "thanks for watching" or other ad-libbed closers.
 
-[NO MIRROR FLIP — anti-shortcut for shot variation, CRITICAL]
-Horizontally mirroring a previous frame is the #1 way the model cheats when given "another angle / different view / turn". DO NOT do this. Detection cues that EVERY shot must keep CONSISTENT (any flip = failure):
-  • The asymmetric face mole / freckle stays on the SAME cheek across all shots
-  • The hair parting stays on the SAME side (left part stays left)
-  • The higher eyebrow stays on the SAME side
-  • Any wall art / lamp / window / pillow stays on the SAME side of frame
-  • Any visible asymmetric clothing detail (logo / bow / contrast trim) stays on the SAME side
-If the SHOT SEQUENCE asks for "another angle", produce a genuine 3D-rotated body in the SAME room with the SAME camera position — never a horizontal flip. If a true rotation can't render cleanly, change the shot to "same camera angle, different action or expression" instead.
+[NO MIRROR FLIP — CRITICAL]
+NEVER horizontally mirror a previous frame to fake "another angle / turn" — the model's #1 cheat. Across ALL shots these stay on the SAME side (any flip = failure): the face mole/freckle, the hair parting, the higher eyebrow, any room object (wall art/lamp/window/pillow), any asymmetric clothing detail (logo/bow/trim). For "another angle", produce a genuine 3D body rotation in the same room with the same camera position; if it can't render cleanly, switch to "same camera angle, different action or expression".
 `.trim()
 
 async function imageToInlinePart(filePath, originalName) {
@@ -391,15 +385,9 @@ TONE: Match pass1Result.narrative_dna.tone_register. Pick the matching delivery 
   • TEACHER_EDUCATIONAL — clear articulation, slight pauses to let info land, "let me show you" energy
 Natural speech patterns appropriate to the tone.
 
-ANTI-BROADCASTER (CRITICAL — the #1 reason AI videos sound machine-generated):
-SPEAKING RATE matches the reference video (do NOT force fast; do NOT force slow). BUT no matter the rate, the CADENCE must be conversational human, NEVER broadcaster.
-KILL these robotic patterns:
-  • Over-articulated consonants (crisp Ts and Ds at every word) — NO. Let endings soften and slur.
-  • Even rhythm on every word — NO. Stress 1-2 keywords per sentence, let other words run together.
-  • Formal mid-sentence pauses ("the . product . is . amazing") — NO. Run clauses together; pause only between thoughts.
-  • Uniform pitch contour ending each sentence flat — NO. Drop / rise / trail off unpredictably.
-  • Perfect grammar / textbook diction — NO. Allow contractions, mild filler ("like", "you know"), occasional self-correction.
-TARGET: sounds like a real person recording on her phone in one take — comfortable, slightly imperfect, with natural micro-hesitations and uneven word stress. NOT a TV anchor reading copy.
+ANTI-BROADCASTER (CRITICAL — #1 reason AI videos sound machine-generated):
+Speaking RATE matches the reference; whatever the rate, CADENCE must be conversational, NEVER broadcaster. KILL these robotic patterns: over-articulated consonants (instead soften/slur word endings); even rhythm (stress 1-2 keywords per sentence, let the rest run together); formal mid-sentence pauses (run clauses together, pause only between thoughts); flat uniform sentence-end pitch (drop/rise/trail off unpredictably); textbook diction (allow contractions, mild filler like "you know", occasional self-correction).
+TARGET: a real person recording on her phone in one take — comfortable, slightly imperfect, uneven word stress. NOT a TV anchor.
 
 [AVOID]
 No static images in video. No shots without a person. No gimbal. No harsh one-sided lighting. No airbrushed skin. No model poses. No slow delivery. No invented lines. No @Image references in video content.
@@ -905,6 +893,8 @@ async function geminiPass1Analyze({
   isSameProduct,
   targetDuration,
   slimMode = false,
+  userDescription = '',
+  mode = 'normal',
 }) {
   const parts = []
   parts.push({
@@ -1032,6 +1022,31 @@ D. unique_creative_signature — Free-text 1-3 sentences. What is the ONE specif
 E. key_phrases — Extract 2-3 specific phrases the creator says that are catchy/memorable hook lines (verbatim from transcript). These should be the lines that, if removed, would make the video lose its punch. Pass 2 should preserve at least one of these in the final script.
 
 CRITICAL: Do NOT default to generic answers. The whole point is capturing what's UNIQUE about THIS video. If you find yourself reaching for the most common option in each list, look harder.
+${mode === 'before-after' && userDescription ? `
+TASK 5 — BEFORE/AFTER SUITABILITY ASSESSMENT
+
+The user wants to make a before/after video with this concept:
+"${userDescription}"
+
+A before/after video works by showing the SAME person in the SAME static standing pose — the ONLY change between LOOK A and LOOK B is the bra. The contrast must be INSTANTLY VISIBLE in a single still frame (≈1 second long).
+
+Assess whether this concept is suitable for that constraint:
+
+SUITABLE (suitable: true) — the contrast is a clear VISUAL SHAPE CHANGE that you can see just by looking:
+  • Breast lift height (high vs. low center of mass)
+  • Cup fullness / upper-cup volume (flat vs. rounded)
+  • Breast shape (projected vs. flat/soft)
+  • Overall silhouette sharpness (structured vs. formless)
+
+NOT SUITABLE (suitable: false) — the contrast requires movement, touch, or imagination:
+  • Comfort, softness, digging straps — you can't see this
+  • Breathability, sweat, fabric feel
+  • Back closure style (requires turning around)
+  • Size inclusivity, adjustable straps
+  • Any claim that needs the person to demo it through action
+  • Any emotional/psychological claim ("confidence", "feel amazing")
+
+Output your assessment in the before_after_suitability field below.` : ''}
 
 Return ONLY this valid JSON, no markdown fences, no explanation:
 {
@@ -1072,7 +1087,12 @@ Return ONLY this valid JSON, no markdown fences, no explanation:
   "selected_image_indices": [1, 3, 5, 7, 9],
   "image_color_role": ["dominant-color", "dominant-color", "dominant-color", "structure-only-different-color", "dominant-color"],
   "compressed_script": "the ${targetDuration}s script (≤${Math.round(targetDuration * 2.8)} words, all flagged words replaced)",
-  "image_selection_reasoning": "1-2 sentences explaining why these images were chosen, and which images are non-dominant-color but kept for structural reasons"
+  "image_selection_reasoning": "1-2 sentences explaining why these images were chosen, and which images are non-dominant-color but kept for structural reasons"${mode === 'before-after' && userDescription ? `,
+  "before_after_suitability": {
+    "suitable": true,
+    "reason": "one sentence explaining why this concept is or is not visually demonstrable as a static bra-only swap",
+    "visual_contrast_type": "e.g. 'lift height' / 'cup fullness' / 'comfort (not visible)' / 'breathability (not visible)'"
+  }` : ''}
 }`,
   })
 
@@ -1168,23 +1188,9 @@ Based on product images: <note key visible details — fabric color, texture, st
 [PRESENTER — used IDENTICALLY in both LOOK A and LOOK B]
 Real everyday person, NOT a model or influencer.
 <Fill in: age range, body type, hair color, skin tone with natural features — visible pores, possible freckles, natural texture. NOT "flawless".>
-ANTI-AI-FACE — face MUST have asymmetric human imperfection. Pick 2-3 of these (NEVER all symmetric/perfect):
-  • one eyebrow sits slightly higher than the other
-  • a single small beauty mark or freckle on cheek or near lip (only ONE side)
-  • slight nose tip asymmetry (tilted slightly to one side)
-  • uneven lower lash density (one side fuller)
-  • faint under-eye shadow more visible on ONE side
-  • lips slightly fuller on one side / one corner sits higher when neutral
-  • slight smile-line asymmetry (one cheek dimples deeper)
-DO NOT generate "perfect symmetric model face". AI symmetry is the #1 tell — kill it.
-ANTI-AI-BODY — the chest/bust is the focal point of a bra video and the #1 place AI looks fake. Enforce:
-  • Natural soft asymmetry — the two sides of the bust are slightly different in shape/position (real bodies are never perfectly mirrored). NEVER perfectly symmetric.
-  • Real skin on chest/décolletage — visible pores, faint natural texture, subtle natural tan/skin-tone variation. NOT airbrushed, NOT plastic-doll smooth, NOT glowing.
-  • Soft directional shadow under the bust and along the neckline — gives real volume. NOT flat even CGI lighting.
-  • The bra cup meets skin with a believable soft contact line — NO glowing edge, NO melting/blurring where fabric meets skin, NO fabric-into-skin bleed.
-  • Natural breast physics — soft, gravity-affected, NOT gravity-defying spherical "implant" shape, NOT exaggerated.
-  • Camera framing on the chest stays MEDIUM (waist-up or chest-up). AVOID extreme tight cleavage close-ups — that magnifies every AI artifact (this overrides any "close-up of the cups" instruction from shot_sequence; replace with a medium framing that still shows the bra clearly).
-HAIR — IMPORTANT: hair must be PULLED AWAY from the chest area to keep the bra straps and neckline fully visible. Use one of: high ponytail / low ponytail / messy bun / topknot / hair clipped back / hair tucked securely behind both shoulders. NEVER "long loose hair" / "long hair flowing over chest" / "long hair down" — loose long hair occluding the chest causes severe AI rendering artifacts (flickering between hair and straps, melting hair-on-fabric textures, distorted neckline geometry).
+ANTI-AI-FACE — face MUST have asymmetric human imperfection; pick 2-3 (never all-symmetric): one eyebrow higher, a single freckle/beauty mark on ONE cheek or near the lip, slight nose-tip tilt, uneven lower-lash density, under-eye shadow heavier on ONE side, one lip corner fuller/higher, deeper smile-line on one cheek. DO NOT generate a "perfect symmetric model face" — AI symmetry is the #1 tell.
+ANTI-AI-BODY — the bust is the #1 place AI looks fake. Enforce: soft natural bust asymmetry (the two sides slightly differ, never perfectly mirrored); real chest skin (visible pores, faint texture, natural tone variation — not airbrushed/plastic/glowing); soft directional shadow under the bust and neckline (not flat CGI light); a believable soft fabric-to-skin contact line (no glowing edge, no melting/bleed); natural gravity-affected breast physics (not spherical "implant" shape, not exaggerated). Keep chest framing MEDIUM (waist/chest-up) — no extreme cleavage close-ups (this overrides any "close-up of the cups" in shot_sequence).
+HAIR — must be PULLED AWAY from the chest (high/low ponytail, bun, topknot, clipped back, or tucked behind both shoulders) so bra straps and neckline stay fully visible. NEVER loose long hair over the chest — it causes severe artifacts (hair/strap flickering, melting hair-on-fabric, distorted neckline).
 MAKEUP & ACCESSORIES (specifics not covered by global character consistency):
   • NO necklaces, earrings, rings, bracelets, or watches — bare neck and ears throughout
   • Minimal natural makeup only: clean skin, neutral lip tint (NEVER bold or glossy lipstick), light or no eye makeup
@@ -1269,15 +1275,9 @@ TONE: Match pass1Result.narrative_dna.tone_register. Pick the matching delivery 
   • TEACHER_EDUCATIONAL — clear articulation, slight pauses to let info land, "let me show you" energy
 Natural speech patterns appropriate to the tone.
 
-ANTI-BROADCASTER (CRITICAL — the #1 reason AI videos sound machine-generated):
-SPEAKING RATE matches the reference video (do NOT force fast; do NOT force slow). BUT no matter the rate, the CADENCE must be conversational human, NEVER broadcaster.
-KILL these robotic patterns:
-  • Over-articulated consonants (crisp Ts and Ds at every word) — NO. Let endings soften and slur.
-  • Even rhythm on every word — NO. Stress 1-2 keywords per sentence, let other words run together.
-  • Formal mid-sentence pauses ("the . product . is . amazing") — NO. Run clauses together; pause only between thoughts.
-  • Uniform pitch contour ending each sentence flat — NO. Drop / rise / trail off unpredictably.
-  • Perfect grammar / textbook diction — NO. Allow contractions, mild filler ("like", "you know"), occasional self-correction.
-TARGET: sounds like a real person recording on her phone in one take — comfortable, slightly imperfect, with natural micro-hesitations and uneven word stress. NOT a TV anchor reading copy.
+ANTI-BROADCASTER (CRITICAL — #1 reason AI videos sound machine-generated):
+Speaking RATE matches the reference; whatever the rate, CADENCE must be conversational, NEVER broadcaster. KILL these robotic patterns: over-articulated consonants (instead soften/slur word endings); even rhythm (stress 1-2 keywords per sentence, let the rest run together); formal mid-sentence pauses (run clauses together, pause only between thoughts); flat uniform sentence-end pitch (drop/rise/trail off unpredictably); textbook diction (allow contractions, mild filler like "you know", occasional self-correction).
+TARGET: a real person recording on her phone in one take — comfortable, slightly imperfect, uneven word stress. NOT a TV anchor.
 
 [AVOID]
 No static images in video. No shots without a person. No gimbal. No harsh one-sided lighting. No airbrushed skin. No model poses. No slow delivery. No invented lines. No @Image references in video content.
@@ -1369,23 +1369,44 @@ The bra is <DOMINANT_COLOR> in every frame. OUTFIT must say "<DOMINANT_COLOR> br
     const colorNew = `[COLOR — only <DOMINANT_COLOR>]
 The bra is <DOMINANT_COLOR> in every frame. In addition to the color NAME, write a plain VISUAL description of the shade — its lightness and hue (e.g. "a light nude close to pale skin tone", "a true mid-grey") — AND an explicit exclusion of the nearest WRONG shades the video model tends to drift toward (e.g. "NOT brown, NOT mocha, NOT dark tan"). OUTFIT must say "<DOMINANT_COLOR> bra"; OPENING LINE must include the color; mention the color name + its visual description in SHOT SEQUENCE at least 2 more times. NEVER write "any color" or alternate color names.`
 
+    const outfitOld = `OUTFIT — match what the reference does (see SHOT SEQUENCE block):
+- If the reference shows an outfit change (e.g. cardigan removed mid-video): presenter wears LOOK A (bra + open cardigan over it) before the switch and LOOK B (cardigan removed, bra fully visible) after. SAME PERSON, SAME hair/makeup/bare neck throughout.
+- If the reference is single-outfit (one-take, no outfit change): keep LOOK A (bra + open cardigan) for the entire video. Bra is glimpsed through the open cardigan but never fully revealed.
+- NEVER force A-B-A-B if the reference doesn't have it.`
+    const outfitNew = `OUTFIT — BEFORE/AFTER, NO OUTER GARMENT (this is a before/after video):
+- The presenter wears ONLY a bra for the ENTIRE video — NO t-shirt, NO cardigan, NO top, NO jacket, bare midriff. This keeps the before/after change clean: the only thing on the upper body is the bra itself.
+- LOOK A = the "BEFORE" state. A DIFFERENT, inferior OLD bra — NOT this product — as described in the user's before/after concept (see "User's additional ideas"). The old bra must look visually TERRIBLE: breast tissue sagging and drooping noticeably downward, the center of mass of the bust sitting low and heavy, upper-cup area completely flat/empty, zero lift, fabric loose and shapeless, band riding up the back. This dramatic sag is the visual hook — render it exaggeratedly so the contrast with LOOK B is instantly shocking. LOOK A is NOT bound by the [PRODUCT VISUAL ANCHOR] or [COLOR] block — it is a completely different garment.
+- LOOK B = the "AFTER" state. THIS product, fully matching the [PRODUCT VISUAL ANCHOR] and [COLOR] block.
+- The presenter (face, hair, makeup, skin, body, pose) is IDENTICAL in LOOK A and LOOK B — the ONLY thing that changes is the bra itself. This is what makes the before/after contrast read instantly.
+- Build LOOK A and LOOK B strictly from the user's before/after concept; do not invent a different contrast.`
+
     const shotAnchor = `Every shot = a real person doing something. No static images. No product-on-white-background shots.`
     const hookDirective = `${shotAnchor}
 
 BEFORE-AFTER HOOK (MANDATORY — this is a before/after template video):
-The FIRST 2 seconds (0:00-0:02) MUST be a rapid-fire hook: jump cuts alternating between LOOK A (the old/problem bra) and LOOK B (this product) roughly every half second. This is a deliberate, EXECUTABLE TikTok editing pattern — the video model renders it as separate short cut segments, NOT as in-frame morphing. Keep the presenter's pose simple and stable in the hook (hands relaxed at her sides) so ONLY the bra changes between cuts.
+The video opens with a 4-second before/after hook in FOUR one-second segments that alternate LOOK A and LOOK B:
+  • 0:00-0:01 = LOOK A (the BEFORE — the inferior old bra from the user's concept, see OUTFIT)
+  • 0:01-0:02 = LOOK B (the AFTER — this product)
+  • 0:02-0:03 = LOOK A
+  • 0:03-0:04 = LOOK B
+Each segment is a HELD shot ~1 second long. Between every segment there is a HARD CUT — a clean instant cut, NOT a morph, NOT a dissolve, NOT a transition animation. The four segments are separate held shots spliced together. The presenter holds the SAME still pose (hands relaxed at her sides, facing camera) in every segment. The ONLY thing that changes across the cuts is the bra — the person's face, hair, makeup, skin, body, posture, background, and framing are PIXEL-IDENTICAL. Do NOT change body shape between LOOK A and LOOK B. The sag difference comes ENTIRELY from the different bra's support, NOT from changing the person's body or posture.
+HOOK DIALOGUE (0:00-0:04): the presenter says a punchy "Before… after… before… after…" callout, lip-synced — "Before" on each LOOK A segment, "after" on each LOOK B segment. This spoken callout makes the A/B contrast land hard. Do NOT place the reference video's opening line in 0:00-0:04.
 LOOK B in the hook MUST be described with MAXIMUM RIGIDITY: a single dense sentence built from the [PRODUCT VISUAL ANCHOR] fields (silhouette + structure + cup type + straps + fabric) PLUS the color name and its visual description from the [COLOR] block PLUS the wrong-shade exclusions. Reuse this exact LOOK B sentence verbatim every time LOOK B appears.
-ACCEPT that the rapid-cut zone will show slight product drift — that is an inherent cost of fast cuts and is acceptable here, because the hook's job is the A/B contrast impact, not product detail. Product accuracy is carried by the slower dwell shots AFTER 0:02.
-After 0:02 — TRANSITION THEN NORMAL:
-The FIRST 1-2 spoken sentences after 0:02 MUST briefly land the SAME before/after selling point the hook is built around (see "User's additional ideas" / the user's concept) — a quick verbal pay-off that bridges the hook into the main content. Keep it to 1-2 sentences, do not dwell.
+After 0:04 — TRANSITION THEN NORMAL:
+The FIRST 1-2 spoken sentences after 0:04 MUST briefly land the SAME before/after selling point the hook is built around (see "User's additional ideas" / the user's concept) — a quick verbal pay-off that bridges the hook into the main content. Keep it to 1-2 sentences, do not dwell.
 Cover that hook selling point ONCE here only — do NOT mention or repeat it again anywhere later in the video.
-Everything after this transition follows the reference video's shot-by-shot skeleton and rhythm normally (same as a normal-mode video), covering the product's OTHER content and selling points — simply SKIP the hook's selling point since it is already addressed in the transition.`
+Everything after this transition follows the reference video's shot-by-shot skeleton and rhythm normally, covering the product's OTHER content and selling points — simply SKIP the hook's selling point since it is already addressed. From 0:04 onward only LOOK B (this product) appears — LOOK A is used ONLY inside the 0:00-0:04 hook. Because the 4-second hook leaves only ~11 seconds for the rest, the post-hook delivery speaks slightly faster and denser to fit all the selling points.
+DIALOGUE DELIVERY (every shot — hook and after): every shot that carries a spoken line MUST show the presenter speaking that line directly to camera, mouth visibly moving, lip-synced — she is an on-camera talking-head creator. Label spoken lines "Dialogue:" (NEVER "Audio:"). NEVER render a line as off-screen voiceover / narration, even if the reference video used voiceover or had an off-camera speaker. A gesture or small action in a dialogue shot is secondary and must NOT replace the talking-to-camera posture — do not describe the presenter as silently posing, looking away, or absorbed in an action while a spoken line is assigned to that shot.`
 
     let out = base
     if (!out.includes(colorOld)) {
       throw new Error('before-after 衍生失败：COLOR 块锚点未匹配，task3Lingerie 模板可能已变更')
     }
     out = out.replace(colorOld, colorNew)
+    if (!out.includes(outfitOld)) {
+      throw new Error('before-after 衍生失败：OUTFIT 块锚点未匹配，task3Lingerie 模板可能已变更')
+    }
+    out = out.replace(outfitOld, outfitNew)
     if (!out.includes(shotAnchor)) {
       throw new Error('before-after 衍生失败：SHOT SEQUENCE 锚点未匹配，task3Lingerie 模板可能已变更')
     }
@@ -1484,8 +1505,9 @@ IMPORTANT RULES:
   This is what makes the generated video faithfully echo the reference's style+rhythm+actions while staying physically safe. Do NOT skip this.${variantRecipe ? `
 - VARIANT RECIPE LOCK (this run is variant "${variantRecipe.label}" — used to diversify outputs from the same reference video for TikTok anti-duplicate):
   • PRESENTER block MUST describe exactly: ${variantRecipe.presenter}
-  • [STYLE] background MUST be: ${variantRecipe.scene}
-  • OUTFIT LOOK A cardigan MUST be: ${variantRecipe.cardigan_color}
+  • [STYLE] background MUST be: ${variantRecipe.scene}${mode === 'before-after' ? `
+  • OUTFIT: do NOT add any cardigan or outer garment — this before/after video has the presenter in ONLY a bra, per the OUTFIT block. Ignore any cardigan hint.` : `
+  • OUTFIT LOOK A cardigan MUST be: ${variantRecipe.cardigan_color}`}
   • Override any conflicting hint from the reference video. The presenter and scene are NOT inferred from the reference — they are FIXED by this variant recipe.` : ''}
 - Do NOT include [FACE & LIKENESS], [REFERENCE VIDEO USAGE], [ANATOMICAL ACCURACY], [NO ON-SCREEN TEXT], [NO IMPROVISED DIALOGUE], or [BODY ATTACHMENT BAN] blocks — these are appended automatically by the pipeline.
 - CRITICAL — NO CONDITIONAL LOGIC IN PROMPT: The seedance_prompt is consumed by a video model that does NOT understand "if/then" / "if X then Y" / "when anchor says X" / conditional clauses. It blends ALL keywords from BOTH branches of any conditional, causing severe hallucinations. RESOLVE every conditional based on PASS 1's actual product_visual_features values and write the FINAL OUTCOME as plain declarative sentences. Never leave words like "if", "when anchor says", "depending on" in the final prompt.
@@ -1575,6 +1597,8 @@ The reference video is NOT for the same product — it is used as a STYLE REFERE
       isSameProduct,
       targetDuration,
       slimMode,
+      userDescription,
+      mode,
     })
 
     // 4) 把 Pass 1 选中的图准备成 Pass 2 的输入（复用 inline part，不重新下载/压缩）
@@ -1627,6 +1651,7 @@ The reference video is NOT for the same product — it is used as a STYLE REFERE
     seedance_prompt: pass2Result.seedance_prompt || '',
     reasoning: pass1Result.image_selection_reasoning || '',
     slim_mode: slimMode,  // 下游 generate.js 用来决定 PRODUCT REMINDER 是否省字段
+    before_after_suitability: pass1Result.before_after_suitability || null,
   }
 
   // 把选中图片编号映射到来源信息（与旧版一致）

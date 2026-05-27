@@ -546,8 +546,15 @@ router.post('/', upload.fields([
       })
       console.log(`[${jobId}] 类目: ${geminiResult.video_analysis?.product_category}，选中图片: ${geminiResult.selected_image_indices}`)
 
-      // Step 2a: 选中的远程图（来自商品链接）补传到 kie.ai 拿公网 URL
-      const remoteToUpload = (geminiResult.selected_images || []).filter(s => s.source === 'remote' && s.sourceUrl)
+      // Step 2a: 选中的远程图（来自商品链接）补传到 S3 拿稳定公网 URL
+      // 已在 hypit S3 上的图直接复用，无需重复上传
+      const OUR_S3_HOST = 'hypit.s3.us-east-1.amazonaws.com'
+      for (const item of (geminiResult.selected_images || [])) {
+        if (item.source === 'remote' && item.sourceUrl?.includes(OUR_S3_HOST)) {
+          item.publicUrl = item.sourceUrl  // 已在自己的 S3，直接复用
+        }
+      }
+      const remoteToUpload = (geminiResult.selected_images || []).filter(s => s.source === 'remote' && s.sourceUrl && !s.publicUrl)
       if (remoteToUpload.length > 0) {
         setStep(2, `上传选中的 ${remoteToUpload.length} 张商品链接图到 S3`)
         for (const item of remoteToUpload) {
@@ -723,13 +730,22 @@ The bra in the video has: ${features.silhouette || ''}${features.structure ? ', 
       const physicalAnchorBlock = `[PHYSICAL ANCHOR — final reminder of the non-negotiable physical rules]
 ONE PERSON across the entire video — same face, hair, makeup, body in every frame. Hands have exactly 5 fingers in natural positions; if a hand cannot render cleanly, keep it out of frame. SURFACE-ONLY contact with the product (no fingers slipping under fabric, no pulling/pinching thin straps). Bra is ${dominantColor || 'the single dominant color'} in EVERY frame. NO mirror-flip transitions.`
 
-      const allBlocks = [SEEDANCE_MANDATORY_BLOCKS, colorLockBlock, featuresSummary, physicalAnchorBlock].filter(Boolean).join('\n\n')
+      // before-after 模式：LOOK A 豁免块，放在所有强制块之后（attention 最高），
+      // 覆盖前面所有「every frame 都是本产品/本色」的措辞 —— LOOK A 是故意不同的旧 bra
+      const beforeAfterExemptionBlock = mode === 'before-after'
+        ? `[BEFORE-AFTER LOOK A EXEMPTION — overrides every "every frame" wording above]
+This is a before/after video. LOOK A is the "before" state, shown ONLY inside the 0:00-0:04 before/after hook, and it deliberately shows a DIFFERENT, inferior OLD bra — NOT this product.
+Every rule above that says the bra must be ${dominantColor || 'the dominant color'} / must match the PRODUCT VISUAL ANCHOR "in every frame" applies ONLY to LOOK B and to every shot from 0:04 onward. LOOK A is EXEMPT — render it as the old/inferior bra described in OUTFIT and SHOT SEQUENCE; do NOT force LOOK A to match the product anchor or the color lock.
+The PRESENTER (face, hair, makeup, skin, body) stays IDENTICAL in LOOK A and LOOK B — character consistency is NOT exempt. Across LOOK A and LOOK B the ONLY thing that changes is the bra (the presenter wears no outer garment).`
+        : ''
+
+      const allBlocks = [SEEDANCE_MANDATORY_BLOCKS, colorLockBlock, featuresSummary, physicalAnchorBlock, beforeAfterExemptionBlock].filter(Boolean).join('\n\n')
       const lastDashIdx = rawPrompt.lastIndexOf('\n---')
       const finalPrompt = lastDashIdx > -1
         ? rawPrompt.slice(0, lastDashIdx) + '\n\n' + allBlocks + '\n' + rawPrompt.slice(lastDashIdx)
         : rawPrompt + '\n\n' + allBlocks
       geminiResult.seedance_prompt = finalPrompt
-      const blockCount = 8 + (dominantColor ? 1 : 0) + (featuresSummary ? 1 : 0) + 1
+      const blockCount = 8 + (dominantColor ? 1 : 0) + (featuresSummary ? 1 : 0) + 1 + (beforeAfterExemptionBlock ? 1 : 0)
       console.log(`[${jobId}] 已注入 ${blockCount} 个块${dominantColor ? `（含 COLOR LOCK = ${dominantColor}）` : ''}，prompt 总长 ${finalPrompt.length} 字符`)
 
       job.geminiResult = geminiResult
@@ -971,6 +987,7 @@ router.get('/status/:jobId', async (req, res) => {
     selectedImages: job.geminiResult?.selected_image_indices,
     reasoning: job.geminiResult?.reasoning,
     reviewReport: job.reviewReport,
+    beforeAfterSuitability: job.geminiResult?.before_after_suitability || null,
     taskCount: job.tasks?.length || 0,
     generationMode: job.generationMode || 'single_pass',
     retryKieSupported: (job.generationMode || 'single_pass') !== 'agentic_segments' && (job.tasks?.length || 0) > 0,

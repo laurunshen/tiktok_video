@@ -708,7 +708,7 @@ export default function App() {
               🎬 Before-After 模板模式
             </label>
             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6, marginLeft: 24 }}>
-              前 2 秒强制做 LOOK A / LOOK B 每半秒快切的 hook，后段按选中卖点递进讲解。台词由卖点生成，参考视频只贡献语气/节奏/运镜风格——配任意高转化带货视频即可，不必是 before-after 结构。普通任务不受影响。
+              前 2 秒强制做 LOOK A / LOOK B 每半秒快切 hook；0:02 后头一两句过渡讲一下 hook 卖点，之后跟普通流程一样照参考视频走（跳过已讲的卖点）。颜色锚定加强、评审放行快切。配任意高转化带货视频即可，不必是 before-after 结构。普通任务不受影响。
             </div>
 
             {beforeAfterMode && (
@@ -762,7 +762,7 @@ export default function App() {
                         border: '1px solid #8b5cf6', background: baSelectedSP.length === 0 ? '#f3f4f6' : '#8b5cf6',
                         color: baSelectedSP.length === 0 ? '#9ca3af' : '#fff',
                         cursor: (baLoadingConcepts || baSelectedSP.length === 0) ? 'not-allowed' : 'pointer' }}>
-                      {baLoadingConcepts ? '生成中…' : '② 根据选中卖点生成 3 个概念'}
+                      {baLoadingConcepts ? '生成中…' : '② 根据选中卖点生成概念'}
                     </button>
                   </div>
                 )}
@@ -1126,6 +1126,29 @@ export default function App() {
               )}
               <span style={{ marginLeft: 'auto', fontSize: 12, color: '#aaa' }}>{jobId}</span>
             </div>
+
+            {/* Before-after 适用性警告 */}
+            {jobStatus.beforeAfterSuitability?.suitable === false && (
+              <div style={{ marginBottom: 16, padding: '10px 14px', background: '#fffbeb', border: '1px solid #f59e0b', borderRadius: 8, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <span style={{ fontSize: 18, lineHeight: 1 }}>⚠️</span>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#92400e', marginBottom: 3 }}>
+                    此卖点不适合 before/after 模板
+                  </div>
+                  <div style={{ fontSize: 12, color: '#b45309', lineHeight: 1.5 }}>
+                    {jobStatus.beforeAfterSuitability.reason}
+                    {jobStatus.beforeAfterSuitability.visual_contrast_type && (
+                      <span style={{ marginLeft: 6, padding: '1px 7px', background: '#fde68a', borderRadius: 4, fontSize: 11 }}>
+                        {jobStatus.beforeAfterSuitability.visual_contrast_type}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#a16207', marginTop: 4 }}>
+                    before/after 只适合"静止一眼看出差距"的视觉对比：胸位高低、罩杯饱满度、整体轮廓挺塌。
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* 视频 */}
             {jobStatus.videos?.length > 0 && (

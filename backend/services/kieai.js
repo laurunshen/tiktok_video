@@ -28,8 +28,8 @@ export async function createVideoTask({
   returnLastFrame = false,
   generateAudio = true,
 }) {
-  // kie.ai Seedance 最大支持 15 秒
-  const clampedDuration = Math.min(Math.max(Math.round(duration), 5), 15)
+  // kie.ai Seedance 支持 4-15 秒
+  const clampedDuration = Math.min(Math.max(Math.round(duration), 4), 15)
 
   const input = {
     prompt,
@@ -48,6 +48,8 @@ export async function createVideoTask({
   if (referenceVideoUrls && referenceVideoUrls.length > 0) {
     input.reference_video_urls = referenceVideoUrls
   }
+  if (firstFrameUrl) input.first_frame_url = firstFrameUrl
+  if (lastFrameUrl) input.last_frame_url = lastFrameUrl
 
   const payload = {
     model: 'bytedance/seedance-2',
