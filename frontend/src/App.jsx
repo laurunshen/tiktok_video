@@ -4,6 +4,7 @@ import HistoryView from './HistoryView.jsx'
 import AffiliateVideos from './AffiliateVideos.jsx'
 import MyTemplates from './MyTemplates.jsx'
 import BenchmarkAnalyzer from './BenchmarkAnalyzer.jsx'
+import WorkflowWizard from './WorkflowWizard.jsx'
 
 const API = '/api'
 
@@ -75,7 +76,9 @@ function DropZone({ label, accept, multiple, onFiles, files, type }) {
   const ref = useRef()
   const handle = (rawFiles) => {
     const filtered = Array.from(rawFiles).filter(f =>
-      type === 'video' ? f.type.startsWith('video/') : f.type.startsWith('image/')
+      type === 'video' ? f.type.startsWith('video/')
+        : type === 'audio' ? f.type.startsWith('audio/')
+        : f.type.startsWith('image/')
     )
     if (filtered.length) onFiles(multiple ? filtered : [filtered[0]])
   }
@@ -87,7 +90,7 @@ function DropZone({ label, accept, multiple, onFiles, files, type }) {
       onClick={() => ref.current.click()}>
       <input ref={ref} type="file" accept={accept} multiple={multiple} style={{ display: 'none' }}
         onChange={e => handle(e.target.files)} />
-      <div style={{ fontSize: 30, marginBottom: 6 }}>{type === 'video' ? '🎬' : '🖼️'}</div>
+      <div style={{ fontSize: 30, marginBottom: 6 }}>{type === 'video' ? '🎬' : type === 'audio' ? '🎙️' : '🖼️'}</div>
       {files?.length > 0
         ? <div style={{ color: '#6366f1', fontWeight: 600 }}>{files.length} 个文件已选择</div>
         : <div><strong style={{ color: '#555' }}>{label}</strong><br /><span style={{ fontSize: 12 }}>点击或拖拽上传</span></div>}
@@ -130,19 +133,11 @@ export default function App() {
   const [resolution, setResolution] = useState('480p')
   const [duration, setDuration] = useState(15)
   const [generationMode, setGenerationMode] = useState('single_pass')  // 'single_pass' | 'agentic_segments'
+  const [refAudio, setRefAudio] = useState([])  // 可选参考音色音频（仅 agentic 模式）：统一各分镜口播音色
   // VARIANT: 同一标杆视频的裂变配方（不同模特+场景），null=不指定
   const [variantSeed, setVariantSeed] = useState(null)
   const [variants, setVariants] = useState([])
   const [skipReferenceVideo, setSkipReferenceVideo] = useState(false)  // A/B 测试：跳过 Seedance reference_video
-  const [beforeAfterMode, setBeforeAfterMode] = useState(false)  // before-after 模板模式（独立支路，不影响普通任务）
-  // before-after 概念助手状态
-  const [baSellingPoints, setBaSellingPoints] = useState([])
-  const [baSelectedSP, setBaSelectedSP] = useState([])
-  const [baConcepts, setBaConcepts] = useState([])
-  const [baLoadingSP, setBaLoadingSP] = useState(false)
-  const [baLoadingConcepts, setBaLoadingConcepts] = useState(false)
-  const [baError, setBaError] = useState('')
-  const [baUserIdea, setBaUserIdea] = useState('')  // 用户自己的 before/after 方向（可选）
   const [jobId, setJobId] = useState(null)
   const [jobStatus, setJobStatus] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -376,9 +371,9 @@ export default function App() {
     fd.append('isSameProduct', isSameProduct ? '1' : '0')
     fd.append('batchCount', generationMode === 'agentic_segments' ? 1 : batchCount)
     fd.append('generationMode', generationMode)
+    if (generationMode === 'agentic_segments' && refAudio[0]) fd.append('referenceAudio', refAudio[0])
     if (variantSeed) fd.append('variantSeed', variantSeed)
     if (skipReferenceVideo) fd.append('skipReferenceVideo', '1')
-    if (beforeAfterMode) fd.append('mode', 'before-after')
     fd.append('resolution', resolution)
     fd.append('duration', duration)
     try {
@@ -429,6 +424,7 @@ export default function App() {
     setProductSkuColor(''); setProductColorInventory(null); setProductAllImages(null)
     setBenchmarkVideos([]); setShowBenchmarks(false)
     setGenerationMode('single_pass')
+    setRefAudio([])
     setVariantSeed(null)
     setJobId(null); setJobStatus(null); setLoading(false)
     setCurrentStep(-1); setError(null); setWaitSec(0); setCategory('lingerie')
@@ -448,47 +444,6 @@ export default function App() {
     navigator.clipboard.writeText(jobStatus.prompt)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
-  }
-
-  // === before-after 概念助手 ===
-  const fetchSellingPoints = async () => {
-    if (!productInfo) { setBaError('请先选择商品'); return }
-    setBaLoadingSP(true); setBaError(''); setBaConcepts([]); setBaSelectedSP([])
-    try {
-      const r = await fetch(`${API}/before-after/selling-points`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ productInfo }),
-      })
-      const d = await r.json()
-      if (!r.ok) throw new Error(d.error || '识别卖点失败')
-      setBaSellingPoints(d.sellingPoints || [])
-    } catch (e) { setBaError(e.message) } finally { setBaLoadingSP(false) }
-  }
-
-  const toggleSellingPoint = (id) => {
-    setBaSelectedSP(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
-  }
-
-  const fetchConcepts = async () => {
-    const chosen = baSellingPoints.filter(sp => baSelectedSP.includes(sp.id))
-    if (chosen.length === 0) { setBaError('请先勾选至少一个卖点'); return }
-    setBaLoadingConcepts(true); setBaError('')
-    try {
-      const r = await fetch(`${API}/before-after/concepts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ productInfo, sellingPoints: chosen, userIdea: baUserIdea }),
-      })
-      const d = await r.json()
-      if (!r.ok) throw new Error(d.error || '生成概念失败')
-      setBaConcepts(d.concepts || [])
-    } catch (e) { setBaError(e.message) } finally { setBaLoadingConcepts(false) }
-  }
-
-  const applyConcept = (concept) => {
-    setDescription(concept.supplement)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   const handleRetryKie = async () => {
@@ -521,6 +476,7 @@ export default function App() {
         <div style={s.tabBar}>
           <button style={s.tabBtn(tab === 'benchmark')} onClick={() => setTab('benchmark')}>标杆分析</button>
           <button style={s.tabBtn(tab === 'generate')} onClick={() => setTab('generate')}>🎬 生成视频</button>
+          <button style={s.tabBtn(tab === 'workflow')} onClick={() => setTab('workflow')}>🧩 分步工作流</button>
           <button style={s.tabBtn(tab === 'products')} onClick={() => setTab('products')}>📦 产品管理</button>
           <button style={s.tabBtn(tab === 'history')} onClick={() => setTab('history')}>📜 历史</button>
           <button style={s.tabBtn(tab === 'affiliate')} onClick={() => setTab('affiliate')}>📊 达人视频库</button>
@@ -555,6 +511,8 @@ export default function App() {
         </div>
 
         <div style={{ display: tab === 'benchmark' ? '' : 'none' }}><BenchmarkAnalyzer /></div>
+
+        <div style={{ display: tab === 'workflow' ? '' : 'none' }}><WorkflowWizard /></div>
 
         {tab === 'generate' && (
         <>
@@ -697,102 +655,6 @@ export default function App() {
               )}
             </div>
           )}
-          <div style={{ marginTop: 14, padding: 12, background: beforeAfterMode ? '#ede9fe' : '#f9fafb', borderRadius: 8, border: '1px solid', borderColor: beforeAfterMode ? '#8b5cf6' : '#e5e7eb' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#1f2937' }}>
-              <input
-                type="checkbox"
-                checked={beforeAfterMode}
-                onChange={e => setBeforeAfterMode(e.target.checked)}
-                style={{ width: 16, height: 16, cursor: 'pointer' }}
-              />
-              🎬 Before-After 模板模式
-            </label>
-            <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6, marginLeft: 24 }}>
-              前 2 秒强制做 LOOK A / LOOK B 每半秒快切 hook；0:02 后头一两句过渡讲一下 hook 卖点，之后跟普通流程一样照参考视频走（跳过已讲的卖点）。颜色锚定加强、评审放行快切。配任意高转化带货视频即可，不必是 before-after 结构。普通任务不受影响。
-            </div>
-
-            {beforeAfterMode && (
-              <div style={{ marginTop: 12, marginLeft: 24, paddingTop: 12, borderTop: '1px dashed #c4b5fd' }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: '#6d28d9', marginBottom: 8 }}>✨ before/after 概念助手</div>
-
-                <button
-                  onClick={fetchSellingPoints}
-                  disabled={baLoadingSP || !productInfo}
-                  style={{ padding: '6px 12px', fontSize: 12, borderRadius: 6, border: '1px solid #8b5cf6',
-                    background: '#fff', color: '#6d28d9', cursor: (baLoadingSP || !productInfo) ? 'not-allowed' : 'pointer', opacity: (baLoadingSP || !productInfo) ? 0.6 : 1 }}>
-                  {baLoadingSP ? '识别中…' : '① AI 识别商品卖点'}
-                </button>
-                {!productInfo && <span style={{ fontSize: 11, color: '#9ca3af', marginLeft: 8 }}>先选商品</span>}
-
-                {baSellingPoints.length > 0 && (
-                  <div style={{ marginTop: 10 }}>
-                    <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 6 }}>勾选要做 before/after 的卖点（可多选）：</div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {baSellingPoints.map(sp => {
-                        const on = baSelectedSP.includes(sp.id)
-                        return (
-                          <div key={sp.id} onClick={() => toggleSellingPoint(sp.id)}
-                            title={sp.detail}
-                            style={{ padding: '6px 10px', fontSize: 12, borderRadius: 6, cursor: 'pointer',
-                              border: '1.5px solid', borderColor: on ? '#8b5cf6' : '#e5e7eb',
-                              background: on ? '#ede9fe' : '#fff', color: on ? '#6d28d9' : '#374151',
-                              fontWeight: on ? 600 : 400 }}>
-                            {on ? '✓ ' : ''}{sp.title}
-                          </div>
-                        )
-                      })}
-                    </div>
-                    <div style={{ marginTop: 10 }}>
-                      <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>
-                        我的想法 / 方向（可选 —— 填了 AI 就只围绕这个角度生成）：
-                      </div>
-                      <textarea
-                        value={baUserIdea}
-                        onChange={e => setBaUserIdea(e.target.value)}
-                        placeholder="例：深V设计适合穿低胸V领衣服。Before 是普通bra边缘从V领口露出来，After 是这款plunge bra刚好藏住、领口干净。"
-                        rows={3}
-                        style={{ width: '100%', boxSizing: 'border-box', fontSize: 12, padding: 8,
-                          borderRadius: 6, border: '1px solid #ddd6fe', resize: 'vertical' }}
-                      />
-                    </div>
-                    <button
-                      onClick={fetchConcepts}
-                      disabled={baLoadingConcepts || baSelectedSP.length === 0}
-                      style={{ marginTop: 10, padding: '6px 12px', fontSize: 12, borderRadius: 6,
-                        border: '1px solid #8b5cf6', background: baSelectedSP.length === 0 ? '#f3f4f6' : '#8b5cf6',
-                        color: baSelectedSP.length === 0 ? '#9ca3af' : '#fff',
-                        cursor: (baLoadingConcepts || baSelectedSP.length === 0) ? 'not-allowed' : 'pointer' }}>
-                      {baLoadingConcepts ? '生成中…' : '② 根据选中卖点生成概念'}
-                    </button>
-                  </div>
-                )}
-
-                {baConcepts.length > 0 && (
-                  <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    {baConcepts.map((c, i) => (
-                      <div key={c.id} style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd6fe', background: '#faf5ff' }}>
-                        <div style={{ fontSize: 12, fontWeight: 600, color: '#6d28d9', marginBottom: 4 }}>概念 {i + 1}：{c.hook}</div>
-                        <div style={{ fontSize: 11, color: '#374151', lineHeight: 1.6 }}>
-                          <div><b>Before：</b>{c.before}</div>
-                          <div><b>After：</b>{c.after}</div>
-                          <div style={{ marginTop: 4, color: '#6b7280' }}><b>补充说明：</b>{c.supplement}</div>
-                        </div>
-                        <button
-                          onClick={() => applyConcept(c)}
-                          style={{ marginTop: 8, padding: '5px 12px', fontSize: 12, borderRadius: 6,
-                            border: 'none', background: '#8b5cf6', color: '#fff', cursor: 'pointer' }}>
-                          用这个 → 填入补充说明
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {baError && <div style={{ marginTop: 8, fontSize: 11, color: '#dc2626' }}>⚠️ {baError}</div>}
-              </div>
-            )}
-          </div>
-
           <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 13, color: '#555' }}>参考视频是否为本产品的带货视频？</span>
             <div style={{ display: 'flex', gap: 0, borderRadius: 7, overflow: 'hidden', border: '1px solid #ddd' }}>
@@ -925,13 +787,21 @@ export default function App() {
                 }}>
                 Agent 分段实验<br/>
                 <span style={{ fontSize: 10, fontWeight: 400, color: generationMode === 'agentic_segments' ? '#2563eb' : '#9ca3af' }}>
-                  10s 以上优先拆成 2 段，当前成片不带音频
+                  LLM 智能分镜，每段聚焦一个卖点，带口播音频
                 </span>
               </button>
             </div>
             {generationMode === 'agentic_segments' && (
-              <div style={{ fontSize: 11, color: '#1d4ed8', marginTop: 8 }}>
-                首段用参考图 + 参考视频建立风格，后段用上一段末帧续写；若总时长小于 10 秒，会自动回退成 1 段实验视频。
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 11, color: '#1d4ed8', marginBottom: 8 }}>
+                  由 LLM 读脚本决定分几段、每段聚焦什么；首段用参考图 + 参考视频建立风格，后段用上一段末帧续写；若总时长小于 10 秒，会自动回退成 1 段。
+                </div>
+                <label style={s.label}>参考音色音频（可选）</label>
+                <div style={{ fontSize: 11, color: '#6b7280', margin: '2px 0 6px' }}>
+                  传一段音频，各分镜口播会统一成这个音色（≤15 秒、≤15MB）。不传则由模型自动决定音色。
+                </div>
+                <DropZone label="上传参考音色音频" accept="audio/*" multiple={false} type="audio"
+                  files={refAudio} onFiles={setRefAudio} />
               </div>
             )}
           </div>
@@ -1126,29 +996,6 @@ export default function App() {
               )}
               <span style={{ marginLeft: 'auto', fontSize: 12, color: '#aaa' }}>{jobId}</span>
             </div>
-
-            {/* Before-after 适用性警告 */}
-            {jobStatus.beforeAfterSuitability?.suitable === false && (
-              <div style={{ marginBottom: 16, padding: '10px 14px', background: '#fffbeb', border: '1px solid #f59e0b', borderRadius: 8, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                <span style={{ fontSize: 18, lineHeight: 1 }}>⚠️</span>
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: '#92400e', marginBottom: 3 }}>
-                    此卖点不适合 before/after 模板
-                  </div>
-                  <div style={{ fontSize: 12, color: '#b45309', lineHeight: 1.5 }}>
-                    {jobStatus.beforeAfterSuitability.reason}
-                    {jobStatus.beforeAfterSuitability.visual_contrast_type && (
-                      <span style={{ marginLeft: 6, padding: '1px 7px', background: '#fde68a', borderRadius: 4, fontSize: 11 }}>
-                        {jobStatus.beforeAfterSuitability.visual_contrast_type}
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ fontSize: 11, color: '#a16207', marginTop: 4 }}>
-                    before/after 只适合"静止一眼看出差距"的视觉对比：胸位高低、罩杯饱满度、整体轮廓挺塌。
-                  </div>
-                </div>
-              </div>
-            )}
 
             {/* 视频 */}
             {jobStatus.videos?.length > 0 && (

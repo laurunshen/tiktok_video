@@ -894,7 +894,6 @@ async function geminiPass1Analyze({
   targetDuration,
   slimMode = false,
   userDescription = '',
-  mode = 'normal',
 }) {
   const parts = []
   parts.push({
@@ -1022,31 +1021,6 @@ D. unique_creative_signature — Free-text 1-3 sentences. What is the ONE specif
 E. key_phrases — Extract 2-3 specific phrases the creator says that are catchy/memorable hook lines (verbatim from transcript). These should be the lines that, if removed, would make the video lose its punch. Pass 2 should preserve at least one of these in the final script.
 
 CRITICAL: Do NOT default to generic answers. The whole point is capturing what's UNIQUE about THIS video. If you find yourself reaching for the most common option in each list, look harder.
-${mode === 'before-after' && userDescription ? `
-TASK 5 — BEFORE/AFTER SUITABILITY ASSESSMENT
-
-The user wants to make a before/after video with this concept:
-"${userDescription}"
-
-A before/after video works by showing the SAME person in the SAME static standing pose — the ONLY change between LOOK A and LOOK B is the bra. The contrast must be INSTANTLY VISIBLE in a single still frame (≈1 second long).
-
-Assess whether this concept is suitable for that constraint:
-
-SUITABLE (suitable: true) — the contrast is a clear VISUAL SHAPE CHANGE that you can see just by looking:
-  • Breast lift height (high vs. low center of mass)
-  • Cup fullness / upper-cup volume (flat vs. rounded)
-  • Breast shape (projected vs. flat/soft)
-  • Overall silhouette sharpness (structured vs. formless)
-
-NOT SUITABLE (suitable: false) — the contrast requires movement, touch, or imagination:
-  • Comfort, softness, digging straps — you can't see this
-  • Breathability, sweat, fabric feel
-  • Back closure style (requires turning around)
-  • Size inclusivity, adjustable straps
-  • Any claim that needs the person to demo it through action
-  • Any emotional/psychological claim ("confidence", "feel amazing")
-
-Output your assessment in the before_after_suitability field below.` : ''}
 
 Return ONLY this valid JSON, no markdown fences, no explanation:
 {
@@ -1087,12 +1061,7 @@ Return ONLY this valid JSON, no markdown fences, no explanation:
   "selected_image_indices": [1, 3, 5, 7, 9],
   "image_color_role": ["dominant-color", "dominant-color", "dominant-color", "structure-only-different-color", "dominant-color"],
   "compressed_script": "the ${targetDuration}s script (≤${Math.round(targetDuration * 2.8)} words, all flagged words replaced)",
-  "image_selection_reasoning": "1-2 sentences explaining why these images were chosen, and which images are non-dominant-color but kept for structural reasons"${mode === 'before-after' && userDescription ? `,
-  "before_after_suitability": {
-    "suitable": true,
-    "reason": "one sentence explaining why this concept is or is not visually demonstrable as a static bra-only swap",
-    "visual_contrast_type": "e.g. 'lift height' / 'cup fullness' / 'comfort (not visible)' / 'breathability (not visible)'"
-  }` : ''}
+  "image_selection_reasoning": "1-2 sentences explaining why these images were chosen, and which images are non-dominant-color but kept for structural reasons"
 }`,
   })
 
@@ -1131,7 +1100,6 @@ async function geminiPass2WritePrompt({
   userDescription,
   variantRecipe,  // 可选：{label, presenter, scene, cardigan_color}，用于裂变
   slimMode = false,
-  mode = 'normal',  // 'normal' | 'before-after'：before-after 走独立衍生模板，普通任务字节级不变
 }) {
   const dialogueRule = isSameProduct
     ? `1. SPOKEN DIALOGUE: Use the compressed_script verbatim from PASS 1 ANALYSIS. Distribute it across the SHOT SEQUENCE shots, preserving the exact wording.`
@@ -1360,63 +1328,7 @@ PRODUCT INTEGRITY — when the product is shown held in hand or off-body, it mus
 CONSISTENCY: Cross-check the AVOID list against the ANCHOR before finalizing — if any banned feature is also listed in the ANCHOR as present (e.g. "no buttons" but ANCHOR says product has buttons), REMOVE it from AVOID. Self-contradicting rules confuse the model.
 ---`
 
-  // === before-after 模板（独立衍生，不污染主流程）===
-  // 原则：task3Lingerie 本体一字不改；before-after 模式对它做两处定向替换后另存为 task3BeforeAfter。
-  // mode !== 'before-after' 时这段完全不执行，普通任务的 task3 与改动前字节级一致。
-  function deriveBeforeAfterTemplate(base) {
-    const colorOld = `[COLOR — only <DOMINANT_COLOR>]
-The bra is <DOMINANT_COLOR> in every frame. OUTFIT must say "<DOMINANT_COLOR> bra"; OPENING LINE must include the color; mention "<DOMINANT_COLOR>" in SHOT SEQUENCE at least 2 more times. NEVER write "any color" or alternate color names.`
-    const colorNew = `[COLOR — only <DOMINANT_COLOR>]
-The bra is <DOMINANT_COLOR> in every frame. In addition to the color NAME, write a plain VISUAL description of the shade — its lightness and hue (e.g. "a light nude close to pale skin tone", "a true mid-grey") — AND an explicit exclusion of the nearest WRONG shades the video model tends to drift toward (e.g. "NOT brown, NOT mocha, NOT dark tan"). OUTFIT must say "<DOMINANT_COLOR> bra"; OPENING LINE must include the color; mention the color name + its visual description in SHOT SEQUENCE at least 2 more times. NEVER write "any color" or alternate color names.`
-
-    const outfitOld = `OUTFIT — match what the reference does (see SHOT SEQUENCE block):
-- If the reference shows an outfit change (e.g. cardigan removed mid-video): presenter wears LOOK A (bra + open cardigan over it) before the switch and LOOK B (cardigan removed, bra fully visible) after. SAME PERSON, SAME hair/makeup/bare neck throughout.
-- If the reference is single-outfit (one-take, no outfit change): keep LOOK A (bra + open cardigan) for the entire video. Bra is glimpsed through the open cardigan but never fully revealed.
-- NEVER force A-B-A-B if the reference doesn't have it.`
-    const outfitNew = `OUTFIT — BEFORE/AFTER, NO OUTER GARMENT (this is a before/after video):
-- The presenter wears ONLY a bra for the ENTIRE video — NO t-shirt, NO cardigan, NO top, NO jacket, bare midriff. This keeps the before/after change clean: the only thing on the upper body is the bra itself.
-- LOOK A = the "BEFORE" state. A DIFFERENT, inferior OLD bra — NOT this product — as described in the user's before/after concept (see "User's additional ideas"). The old bra must look visually TERRIBLE: breast tissue sagging and drooping noticeably downward, the center of mass of the bust sitting low and heavy, upper-cup area completely flat/empty, zero lift, fabric loose and shapeless, band riding up the back. This dramatic sag is the visual hook — render it exaggeratedly so the contrast with LOOK B is instantly shocking. LOOK A is NOT bound by the [PRODUCT VISUAL ANCHOR] or [COLOR] block — it is a completely different garment.
-- LOOK B = the "AFTER" state. THIS product, fully matching the [PRODUCT VISUAL ANCHOR] and [COLOR] block.
-- The presenter (face, hair, makeup, skin, body, pose) is IDENTICAL in LOOK A and LOOK B — the ONLY thing that changes is the bra itself. This is what makes the before/after contrast read instantly.
-- Build LOOK A and LOOK B strictly from the user's before/after concept; do not invent a different contrast.`
-
-    const shotAnchor = `Every shot = a real person doing something. No static images. No product-on-white-background shots.`
-    const hookDirective = `${shotAnchor}
-
-BEFORE-AFTER HOOK (MANDATORY — this is a before/after template video):
-The video opens with a 4-second before/after hook in FOUR one-second segments that alternate LOOK A and LOOK B:
-  • 0:00-0:01 = LOOK A (the BEFORE — the inferior old bra from the user's concept, see OUTFIT)
-  • 0:01-0:02 = LOOK B (the AFTER — this product)
-  • 0:02-0:03 = LOOK A
-  • 0:03-0:04 = LOOK B
-Each segment is a HELD shot ~1 second long. Between every segment there is a HARD CUT — a clean instant cut, NOT a morph, NOT a dissolve, NOT a transition animation. The four segments are separate held shots spliced together. The presenter holds the SAME still pose (hands relaxed at her sides, facing camera) in every segment. The ONLY thing that changes across the cuts is the bra — the person's face, hair, makeup, skin, body, posture, background, and framing are PIXEL-IDENTICAL. Do NOT change body shape between LOOK A and LOOK B. The sag difference comes ENTIRELY from the different bra's support, NOT from changing the person's body or posture.
-HOOK DIALOGUE (0:00-0:04): the presenter says a punchy "Before… after… before… after…" callout, lip-synced — "Before" on each LOOK A segment, "after" on each LOOK B segment. This spoken callout makes the A/B contrast land hard. Do NOT place the reference video's opening line in 0:00-0:04.
-LOOK B in the hook MUST be described with MAXIMUM RIGIDITY: a single dense sentence built from the [PRODUCT VISUAL ANCHOR] fields (silhouette + structure + cup type + straps + fabric) PLUS the color name and its visual description from the [COLOR] block PLUS the wrong-shade exclusions. Reuse this exact LOOK B sentence verbatim every time LOOK B appears.
-After 0:04 — TRANSITION THEN NORMAL:
-The FIRST 1-2 spoken sentences after 0:04 MUST briefly land the SAME before/after selling point the hook is built around (see "User's additional ideas" / the user's concept) — a quick verbal pay-off that bridges the hook into the main content. Keep it to 1-2 sentences, do not dwell.
-Cover that hook selling point ONCE here only — do NOT mention or repeat it again anywhere later in the video.
-Everything after this transition follows the reference video's shot-by-shot skeleton and rhythm normally, covering the product's OTHER content and selling points — simply SKIP the hook's selling point since it is already addressed. From 0:04 onward only LOOK B (this product) appears — LOOK A is used ONLY inside the 0:00-0:04 hook. Because the 4-second hook leaves only ~11 seconds for the rest, the post-hook delivery speaks slightly faster and denser to fit all the selling points.
-DIALOGUE DELIVERY (every shot — hook and after): every shot that carries a spoken line MUST show the presenter speaking that line directly to camera, mouth visibly moving, lip-synced — she is an on-camera talking-head creator. Label spoken lines "Dialogue:" (NEVER "Audio:"). NEVER render a line as off-screen voiceover / narration, even if the reference video used voiceover or had an off-camera speaker. A gesture or small action in a dialogue shot is secondary and must NOT replace the talking-to-camera posture — do not describe the presenter as silently posing, looking away, or absorbed in an action while a spoken line is assigned to that shot.`
-
-    let out = base
-    if (!out.includes(colorOld)) {
-      throw new Error('before-after 衍生失败：COLOR 块锚点未匹配，task3Lingerie 模板可能已变更')
-    }
-    out = out.replace(colorOld, colorNew)
-    if (!out.includes(outfitOld)) {
-      throw new Error('before-after 衍生失败：OUTFIT 块锚点未匹配，task3Lingerie 模板可能已变更')
-    }
-    out = out.replace(outfitOld, outfitNew)
-    if (!out.includes(shotAnchor)) {
-      throw new Error('before-after 衍生失败：SHOT SEQUENCE 锚点未匹配，task3Lingerie 模板可能已变更')
-    }
-    out = out.replace(shotAnchor, hookDirective)
-    return out
-  }
-
-  const task3 = mode === 'before-after'
-    ? deriveBeforeAfterTemplate(task3Lingerie)  // before-after 强制走衍生 lingerie 模板
-    : (category === 'lingerie' ? task3Lingerie : task3General)
+  const task3 = category === 'lingerie' ? task3Lingerie : task3General
 
   const parts = []
   parts.push({
@@ -1505,9 +1417,8 @@ IMPORTANT RULES:
   This is what makes the generated video faithfully echo the reference's style+rhythm+actions while staying physically safe. Do NOT skip this.${variantRecipe ? `
 - VARIANT RECIPE LOCK (this run is variant "${variantRecipe.label}" — used to diversify outputs from the same reference video for TikTok anti-duplicate):
   • PRESENTER block MUST describe exactly: ${variantRecipe.presenter}
-  • [STYLE] background MUST be: ${variantRecipe.scene}${mode === 'before-after' ? `
-  • OUTFIT: do NOT add any cardigan or outer garment — this before/after video has the presenter in ONLY a bra, per the OUTFIT block. Ignore any cardigan hint.` : `
-  • OUTFIT LOOK A cardigan MUST be: ${variantRecipe.cardigan_color}`}
+  • [STYLE] background MUST be: ${variantRecipe.scene}
+  • OUTFIT LOOK A cardigan MUST be: ${variantRecipe.cardigan_color}
   • Override any conflicting hint from the reference video. The presenter and scene are NOT inferred from the reference — they are FIXED by this variant recipe.` : ''}
 - Do NOT include [FACE & LIKENESS], [REFERENCE VIDEO USAGE], [ANATOMICAL ACCURACY], [NO ON-SCREEN TEXT], [NO IMPROVISED DIALOGUE], or [BODY ATTACHMENT BAN] blocks — these are appended automatically by the pipeline.
 - CRITICAL — NO CONDITIONAL LOGIC IN PROMPT: The seedance_prompt is consumed by a video model that does NOT understand "if/then" / "if X then Y" / "when anchor says X" / conditional clauses. It blends ALL keywords from BOTH branches of any conditional, causing severe hallucinations. RESOLVE every conditional based on PASS 1's actual product_visual_features values and write the FINAL OUTCOME as plain declarative sentences. Never leave words like "if", "when anchor says", "depending on" in the final prompt.
@@ -1552,7 +1463,6 @@ export async function analyzeAndGeneratePrompt({
   productInfo = null,
   isSameProduct = true,
   variantSeed = null,  // 1-5 选不同的模特+场景配方，避免标杆复用时被查重
-  mode = 'normal',  // 'normal' | 'before-after'
 }) {
   const variantRecipe = getVariantRecipe(variantSeed)
   if (variantRecipe) {
@@ -1598,7 +1508,6 @@ The reference video is NOT for the same product — it is used as a STYLE REFERE
       targetDuration,
       slimMode,
       userDescription,
-      mode,
     })
 
     // 4) 把 Pass 1 选中的图准备成 Pass 2 的输入（复用 inline part，不重新下载/压缩）
@@ -1630,7 +1539,6 @@ The reference video is NOT for the same product — it is used as a STYLE REFERE
       userDescription,
       variantRecipe,
       slimMode,
-      mode,
     })
   } finally {
     // 清理临时视频文件
@@ -1651,7 +1559,6 @@ The reference video is NOT for the same product — it is used as a STYLE REFERE
     seedance_prompt: pass2Result.seedance_prompt || '',
     reasoning: pass1Result.image_selection_reasoning || '',
     slim_mode: slimMode,  // 下游 generate.js 用来决定 PRODUCT REMINDER 是否省字段
-    before_after_suitability: pass1Result.before_after_suitability || null,
   }
 
   // 把选中图片编号映射到来源信息（与旧版一致）

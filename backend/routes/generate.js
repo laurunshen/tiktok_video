@@ -15,7 +15,7 @@ import { judgeGeneratedVideo, judgeNarrativeDifferentiation } from '../services/
 import { uploadMediaFiles, uploadMediaFile } from '../services/media-upload.js'
 import { createBatchTasks, createVideoTask, getTaskStatus, parseTaskResult } from '../services/kieai.js'
 import { getTikTokPlaybackUrl } from '../services/snaptik.js'
-import { buildAgenticSegmentPlan, summarizeSegmentPlan } from '../services/agentic-planner.js'
+import { buildAgenticSegmentPlan, buildAgenticSegmentPlanLLM, summarizeSegmentPlan } from '../services/agentic-planner.js'
 import { buildAgenticSegmentPrompt } from '../services/agentic-prompt-builder.js'
 import { extractLastFrame, stitchSegments } from '../services/agentic-stitcher.js'
 
@@ -253,20 +253,21 @@ async function runAgenticGeneration({
   finalPrompt,
   referenceImageUrls,
   referenceVideoUrls,
+  referenceAudioUrl = '',
   resolution,
   duration,
   allFiles,
   setStep,
 }) {
-  const plan = buildAgenticSegmentPlan({
+  // LLM 智能分镜（失败时内部 fallback 到规则版 2 段）
+  const plan = await buildAgenticSegmentPlanLLM({
     targetDuration: duration,
-    compressedScript: geminiResult.compressed_script,
-    productVisualFeatures: geminiResult.product_visual_features,
-    dominantColor: geminiResult.dominant_color,
+    geminiResult,
   })
 
   job.agentPlan = plan
   job.agentPlanSummary = summarizeSegmentPlan(plan)
+  console.log(`[${jobId}] Agent 分镜计划:`, JSON.stringify(job.agentPlanSummary))
   job.tasks = []
   job.taskStatuses = plan.segments.map(segment => ({
     taskId: null,
@@ -285,22 +286,27 @@ async function runAgenticGeneration({
     const taskIndex = segment.index - 1
     setStep(3, `Agent 生成第 ${segment.index}/${plan.segments.length} 段（${segment.role}）`)
 
-    const segmentPrompt = buildAgenticSegmentPrompt({
+    let segmentPrompt = buildAgenticSegmentPrompt({
       basePrompt: finalPrompt,
       segment,
       plan,
     })
+    // 参考音频做音色锚点：各段共用同一段音频，口播音色保持一致
+    if (referenceAudioUrl) {
+      segmentPrompt += '\n\n[VOICE ANCHOR]\nThe presenter speaks with the EXACT voice timbre, gender, age, and accent of the provided reference audio. Keep this same voice identity across every segment of the video; never switch to a different-sounding speaker.'
+    }
 
     const task = await createVideoTask({
       prompt: segmentPrompt,
       referenceImageUrls,
       referenceVideoUrls: segment.seedanceMode === 'multimodal_reference' ? referenceVideoUrls : [],
+      referenceAudioUrls: referenceAudioUrl ? [referenceAudioUrl] : [],
       firstFrameUrl: segment.seedanceMode === 'first_frame_continue' ? firstFrameUrl : '',
       resolution,
       duration: segment.duration,
       aspectRatio: '9:16',
       returnLastFrame: !!segment.returnLastFrame,
-      generateAudio: plan.segments.length === 1,
+      generateAudio: true,
     })
 
     job.taskStatuses[taskIndex] = {
@@ -386,7 +392,7 @@ async function runAgenticGeneration({
   if (segmentArtifacts.length > 1) {
     setStep(3, '拼接 Agent 分段视频')
     finalVideoPath = path.join(os.tmpdir(), `${uuidv4()}-agent-final.mp4`)
-    await stitchSegments(segmentArtifacts.map(segment => segment.localVideoPath), finalVideoPath)
+    await stitchSegments(segmentArtifacts.map(segment => segment.localVideoPath), finalVideoPath, { resolution, withAudio: true })
     allFiles.push({ path: finalVideoPath })
   }
 
@@ -416,6 +422,7 @@ async function runAgenticGeneration({
 router.post('/', upload.fields([
   { name: 'referenceVideo', maxCount: 1 },
   { name: 'productImages', maxCount: 20 },
+  { name: 'referenceAudio', maxCount: 1 },
 ]), async (req, res) => {
   const allFiles = []
   // 收集本任务用到的产品图 URL，任务结束时精准清理它们的 review 缓存（不影响并发任务）
@@ -424,13 +431,12 @@ router.post('/', upload.fields([
   try {
     const referenceVideoFile = req.files?.referenceVideo?.[0]
     const productImageFiles = req.files?.productImages || []
+    const referenceAudioFile = req.files?.referenceAudio?.[0]  // 可选：agentic 模式下统一各段口播音色
     const userDescription = req.body.userDescription || ''
     const userScript = req.body.userScript || ''
     const category = req.body.category || 'general'
     const productInfo = req.body.productInfo ? JSON.parse(req.body.productInfo) : null
-    const mode = req.body.mode === 'before-after' ? 'before-after' : 'normal'  // before-after 模板模式
     const generationMode = req.body.generationMode === 'agentic_segments' ? 'agentic_segments' : 'single_pass'
-    // isSameProduct 在 normal 和 before-after 模式下同义：before-after 后半段就是 normal 流程，
     // 同产品=用参考视频真实台词，不同产品=台词全新写
     const isSameProduct = req.body.isSameProduct !== '0'
     const tiktokVideoUrl = req.body.tiktokVideoUrl || ''  // TikTok 视频链接（可替代上传视频）
@@ -466,6 +472,7 @@ router.post('/', upload.fields([
     console.log(`[generate] 产品图合集：上传 ${productImageFiles.length} + 链接 ${productImageUrls.length} = ${totalImageCount} 张`)
 
     if (referenceVideoFile) allFiles.push(referenceVideoFile)
+    if (referenceAudioFile) allFiles.push(referenceAudioFile)
     allFiles.push(...productImageFiles)
 
     // 立即建 jobStore 条目，前端轮询时可以拿到实时步骤
@@ -542,7 +549,6 @@ router.post('/', upload.fields([
         productInfo,
         isSameProduct,
         variantSeed,
-        mode,
       })
       console.log(`[${jobId}] 类目: ${geminiResult.video_analysis?.product_category}，选中图片: ${geminiResult.selected_image_indices}`)
 
@@ -651,7 +657,6 @@ router.post('/', upload.fields([
             productVisualFeatures: geminiResult.product_visual_features,
             productImageUrls: finalReferenceImageUrls,
             targetDuration: duration,
-            mode,
           })
         } catch (e) {
           console.warn(`[${jobId}] 评估调用异常（跳过评估，使用当前 prompt）: ${e.message}`)
@@ -730,28 +735,26 @@ The bra in the video has: ${features.silhouette || ''}${features.structure ? ', 
       const physicalAnchorBlock = `[PHYSICAL ANCHOR — final reminder of the non-negotiable physical rules]
 ONE PERSON across the entire video — same face, hair, makeup, body in every frame. Hands have exactly 5 fingers in natural positions; if a hand cannot render cleanly, keep it out of frame. SURFACE-ONLY contact with the product (no fingers slipping under fabric, no pulling/pinching thin straps). Bra is ${dominantColor || 'the single dominant color'} in EVERY frame. NO mirror-flip transitions.`
 
-      // before-after 模式：LOOK A 豁免块，放在所有强制块之后（attention 最高），
-      // 覆盖前面所有「every frame 都是本产品/本色」的措辞 —— LOOK A 是故意不同的旧 bra
-      const beforeAfterExemptionBlock = mode === 'before-after'
-        ? `[BEFORE-AFTER LOOK A EXEMPTION — overrides every "every frame" wording above]
-This is a before/after video. LOOK A is the "before" state, shown ONLY inside the 0:00-0:04 before/after hook, and it deliberately shows a DIFFERENT, inferior OLD bra — NOT this product.
-Every rule above that says the bra must be ${dominantColor || 'the dominant color'} / must match the PRODUCT VISUAL ANCHOR "in every frame" applies ONLY to LOOK B and to every shot from 0:04 onward. LOOK A is EXEMPT — render it as the old/inferior bra described in OUTFIT and SHOT SEQUENCE; do NOT force LOOK A to match the product anchor or the color lock.
-The PRESENTER (face, hair, makeup, skin, body) stays IDENTICAL in LOOK A and LOOK B — character consistency is NOT exempt. Across LOOK A and LOOK B the ONLY thing that changes is the bra (the presenter wears no outer garment).`
-        : ''
-
-      const allBlocks = [SEEDANCE_MANDATORY_BLOCKS, colorLockBlock, featuresSummary, physicalAnchorBlock, beforeAfterExemptionBlock].filter(Boolean).join('\n\n')
+      const allBlocks = [SEEDANCE_MANDATORY_BLOCKS, colorLockBlock, featuresSummary, physicalAnchorBlock].filter(Boolean).join('\n\n')
       const lastDashIdx = rawPrompt.lastIndexOf('\n---')
       const finalPrompt = lastDashIdx > -1
         ? rawPrompt.slice(0, lastDashIdx) + '\n\n' + allBlocks + '\n' + rawPrompt.slice(lastDashIdx)
         : rawPrompt + '\n\n' + allBlocks
       geminiResult.seedance_prompt = finalPrompt
-      const blockCount = 8 + (dominantColor ? 1 : 0) + (featuresSummary ? 1 : 0) + 1 + (beforeAfterExemptionBlock ? 1 : 0)
+      const blockCount = 8 + (dominantColor ? 1 : 0) + (featuresSummary ? 1 : 0) + 1
       console.log(`[${jobId}] 已注入 ${blockCount} 个块${dominantColor ? `（含 COLOR LOCK = ${dominantColor}）` : ''}，prompt 总长 ${finalPrompt.length} 字符`)
 
       job.geminiResult = geminiResult
       job.referenceVideoUrls = referenceVideoUrls   // 持久化，供 retry-kie 复用
 
       if (generationMode === 'agentic_segments') {
+        // 可选：上传参考音色音频，供各分镜统一口播音色
+        let referenceAudioUrl = ''
+        if (referenceAudioFile) {
+          setStep(2, '上传参考音色音频')
+          referenceAudioUrl = await uploadMediaFile(referenceAudioFile.path, referenceAudioFile.originalname || 'reference-audio.mp3')
+          console.log(`[${jobId}] 参考音色音频已上传: ${referenceAudioUrl}`)
+        }
         setStep(2, 'Agent Planner 生成分段计划')
         const agentResult = await runAgenticGeneration({
           job,
@@ -760,6 +763,7 @@ The PRESENTER (face, hair, makeup, skin, body) stays IDENTICAL in LOOK A and LOO
           finalPrompt,
           referenceImageUrls: finalReferenceImageUrls,
           referenceVideoUrls,
+          referenceAudioUrl,
           resolution,
           duration,
           allFiles,
@@ -987,7 +991,6 @@ router.get('/status/:jobId', async (req, res) => {
     selectedImages: job.geminiResult?.selected_image_indices,
     reasoning: job.geminiResult?.reasoning,
     reviewReport: job.reviewReport,
-    beforeAfterSuitability: job.geminiResult?.before_after_suitability || null,
     taskCount: job.tasks?.length || 0,
     generationMode: job.generationMode || 'single_pass',
     retryKieSupported: (job.generationMode || 'single_pass') !== 'agentic_segments' && (job.tasks?.length || 0) > 0,

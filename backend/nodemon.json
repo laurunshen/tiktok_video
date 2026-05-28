@@ -1,0 +1,4 @@
+{
+  "watch": ["server.js", "load-env.js", "routes", "services"],
+  "ext": "js,mjs,cjs"
+}

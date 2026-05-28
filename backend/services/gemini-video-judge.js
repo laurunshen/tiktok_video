@@ -54,12 +54,8 @@ async function imageUrlToInlinePart(url) {
  * 评分单条生成视频（无标杆对比）
  * referenceImageUrls：传给 Seedance 的原始产品图（让 judge 做视觉对比，product_accuracy 才有依据）
  */
-export async function judgeGeneratedVideo({ generatedVideoUrl, productInfo, prompt, referenceImageUrls = [], mode = 'normal' }) {
+export async function judgeGeneratedVideo({ generatedVideoUrl, productInfo, prompt, referenceImageUrls = [] }) {
   const parts = []
-  // before-after 视频前 0-4 秒故意展示一件不同的旧 bra（LOOK A），评分时不能据此判产品不一致
-  const beforeAfterJudgeNote = mode === 'before-after'
-    ? ` IMPORTANT — this is a BEFORE/AFTER video: the first 4 seconds (0:00-0:04) deliberately alternate a DIFFERENT, inferior OLD "before" bra with the product. Judge PRODUCT_ACCURACY ONLY on the product bra shown from 0:04 onward. Do NOT penalize the 0:00-0:04 hook for showing a different bra — that different "before" bra is intentional by design, NOT an error or inconsistency.`
-    : ''
 
   // 1) 先放参考图（带 label，让 judge 知道"产品应该长这样"）
   const refImages = []
@@ -100,8 +96,8 @@ Score the video on these dimensions (0-10 each):
 
 1. PRODUCT_ACCURACY — ${hasRefs
       ? `compare the bra in the VIDEO against the ${refImages.length} REFERENCE IMAGES at the top of this prompt. Score how well it matches: silhouette / neckline shape / color / edge style / underwire visibility / strap style / closure / distinguishing details. 10 = identical to references; 0 = completely different garment.`
-      : `does the bra in the video look like a coherent real product (silhouette, color, edges, structure)? NOTE: no reference images provided — judge based on internal consistency only.`}${beforeAfterJudgeNote}
-2. CHARACTER_CONSISTENCY — same person across all cuts (face/hair/makeup/body)? ${mode === 'before-after' ? 'NOTE: the BRA intentionally changes during the 0:00-0:04 hook (before/after) — that is by design; judge only the PERSON (face/hair/body), not the bra.' : ''}
+      : `does the bra in the video look like a coherent real product (silhouette, color, edges, structure)? NOTE: no reference images provided — judge based on internal consistency only.`}
+2. CHARACTER_CONSISTENCY — same person across all cuts (face/hair/makeup/body)?
 3. NATURAL_UGC_FEEL — looks like authentic creator-shot phone video, not AI-generated? Specifically watch for: too-perfect symmetric face / "plastic" skin / artificial lighting / unnatural smile holds.
 4. ANATOMICAL_CORRECTNESS — hands/fingers/face proportions all natural? No fused / extra / melted fingers.
 5. AUDIO_QUALITY — clean indoor voice, no wind/echo/glitches?

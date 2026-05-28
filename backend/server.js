@@ -26,8 +26,8 @@ import generateRouter from './routes/generate.js'
 import callbackRouter from './routes/callback.js'
 import productRouter from './routes/product.js'
 import templatesRouter from './routes/templates.js'
-import beforeAfterRouter from './routes/before-after.js'
 import benchmarkRouter from './routes/benchmark.js'
+import workflowRouter from './routes/workflow.js'
 import { initDb } from './services/db.js'
 
 const app = express()
@@ -46,8 +46,8 @@ app.use('/api/generate', generateRouter)
 app.use('/api/callback', callbackRouter)
 app.use('/api/product', productRouter)
 app.use('/api/templates', templatesRouter)
-app.use('/api/before-after', beforeAfterRouter)
 app.use('/api/benchmark', benchmarkRouter)
+app.use('/api/workflow', workflowRouter)
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() })

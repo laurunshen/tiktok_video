@@ -1,3 +1,5 @@
+import { SEEDANCE_MANDATORY_BLOCKS } from './gemini.js'
+
 function buildGlobalLockSummary(globalLocks = {}) {
   const bits = [
     globalLocks.dominantColor ? `dominant color = ${globalLocks.dominantColor}` : '',
@@ -10,15 +12,33 @@ function buildGlobalLockSummary(globalLocks = {}) {
   return bits.join('; ')
 }
 
-export function buildAgenticSegmentPrompt({
-  basePrompt,
-  segment,
-  plan,
-}) {
-  if (!segment || segment.role === 'full_video') {
-    return basePrompt
+// 精简模式：LLM 已为本段写好聚焦 prompt（segment.segmentPrompt）。
+// 这里只补上跨段连续性指令 + 强制安全块，不再附带完整 basePrompt，
+// 避免模型被无关的全片时间线和其它段内容稀释注意力。
+function buildSlimSegmentPrompt({ segment, plan }) {
+  const lockSummary = buildGlobalLockSummary(plan?.globalLocks)
+  const lines = [
+    '[AGENT SEGMENT MODE]',
+    `You are generating segment ${segment.index}/${plan.segments.length}. This segment must be exactly ${segment.duration} seconds.`,
+    `Role: ${segment.role}.${segment.focus ? ` Focus on ONE thing only: ${segment.focus}.` : ''}`,
+    'This is ONE continuous video project, not an unrelated clip. Keep the exact same AI-generated presenter identity, face, hair, body, outfit, product, room, lighting, camera distance, and handheld phone-video style as the other segments.',
+    lockSummary ? `Global locks that must stay identical across every segment: ${lockSummary}.` : '',
+  ]
+
+  if (segment.seedanceMode === 'first_frame_continue') {
+    lines.push(
+      'The provided first frame is a hard continuity anchor. Begin as if the camera never cut: same presenter, same pose direction, same room, same camera distance, same lighting, same product placement. No new establishing shot, no different person, no outfit reset, no sudden zoom or angle jump at the start.',
+    )
   }
 
+  lines.push('', '[THIS SEGMENT — EXECUTE ONLY THIS]', segment.segmentPrompt)
+
+  const header = lines.filter(Boolean).join('\n')
+  return `${header}\n\n[MANDATORY GLOBAL RULES — ALWAYS APPLY]\n${SEEDANCE_MANDATORY_BLOCKS}`
+}
+
+// 旧逻辑：规则版 planner 的段没有 segmentPrompt，仍把完整 basePrompt 当约束库使用。
+function buildLegacySegmentPrompt({ basePrompt, segment, plan }) {
   const lockSummary = buildGlobalLockSummary(plan?.globalLocks)
   const headerLines = [
     '[AGENT SEGMENT MODE]',
@@ -52,4 +72,15 @@ export function buildAgenticSegmentPrompt({
 
   const header = headerLines.filter(Boolean).join('\n')
   return `${header}\n\n[BASE PROMPT CONSTRAINT LIBRARY — DO NOT EXECUTE FULL TIMELINE]\n${basePrompt}`
+}
+
+export function buildAgenticSegmentPrompt({ basePrompt, segment, plan }) {
+  if (!segment || segment.role === 'full_video') {
+    return basePrompt
+  }
+  // LLM 规划的段自带精简 segmentPrompt → 走精简模式；规则版段没有 → 退回旧逻辑
+  if (segment.segmentPrompt) {
+    return buildSlimSegmentPrompt({ segment, plan })
+  }
+  return buildLegacySegmentPrompt({ basePrompt, segment, plan })
 }

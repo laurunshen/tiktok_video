@@ -86,23 +86,8 @@ export async function reviewPrompt({
   productVisualFeatures,
   productImageUrls = [],
   targetDuration,
-  mode = 'normal',  // 'normal' | 'before-after'：before-after 时注入快切白名单，普通任务 prompt 字节级不变
 }) {
   const parts = []
-
-  // before-after 专属白名单：评审模型会把 before/after 快切误判成 body morphing。
-  // 仅 mode === 'before-after' 时注入；普通任务此变量为空字符串，review prompt 不变。
-  const beforeAfterAllowance = mode === 'before-after'
-    ? `
-
-EXPLICITLY ALLOWED FOR THIS PROMPT — do NOT flag as critical:
-  ✅ Rapid alternating / jump cuts between two outfits or two "looks" (the before/after hook,
-     e.g. "rapid-fire cuts alternating between LOOK A and LOOK B every half second").
-     This is a standard, executable TikTok format. The video model renders it as separate
-     short cut segments, NOT in-frame body morphing. Treat it as normal editing — never a
-     hallucination risk. Slight product drift inside the rapid-cut zone is expected and
-     acceptable; it is NOT a critical issue.`
-    : ''
 
   parts.push({
     text: `You are a senior creative director reviewing a draft video generation prompt written by a junior copywriter. Your job is to catch problems BEFORE the prompt is sent to an expensive video generation model. Be ruthless — every issue caught saves significant compute cost.
@@ -158,7 +143,7 @@ CLASS B — SEVERE PHYSICAL HALLUCINATION RISK (will produce visible body/garmen
      ❌ Fingers slipping UNDER tight clothing (bra band, underwire, strap)
      ❌ Hands clipping THROUGH straps or fabric
      ❌ Multi-finger interaction with thin/delicate product parts at extreme angles
-   - DO NOT flag critical for: speaking pace too fast, shot length too short, scene description not vivid enough, missing variety.${beforeAfterAllowance}
+   - DO NOT flag critical for: speaking pace too fast, shot length too short, scene description not vivid enough, missing variety.
 
 EVERYTHING ELSE = warning (does NOT block, will not trigger revision):
    - Word budget overflow (even +20% over) → warning only

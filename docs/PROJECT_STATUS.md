@@ -1,6 +1,6 @@
 # 项目当前状态总览
 
-> 最后更新：2026-05-25 — + Agent 分段生成模式设计文档（见 `docs/AGENTIC_SEGMENT_GENERATION_PLAN.md`）
+> 最后更新：2026-05-29 — before-after 模板模式已删除；新增「分步工作流」(WorkflowWizard) A→D；模特库 + 关键帧 + 并行出视频。
 > 用途：记录当前项目架构、生成模式、已知问题、关键决策
 
 ---
@@ -9,177 +9,160 @@
 
 **自动化生成 TikTok UGC 内衣带货视频**：
 - 输入：商品链接（爬产品图）+ 一条同类目参考视频（学风格/节奏/脚本）
-- 输出：1 条 480p 9:16 竖屏视频，可直接发到 TikTok
+- 输出：480p/720p 9:16 竖屏视频，可直接发到 TikTok
 - 核心需求：
   1. **产品细节绝对一致**（颜色 / 边缘 / 钢圈 / 肩带 / 扣子）
   2. **角色一致性**（同一人贯穿全程）
   3. **物理瑕疵零容忍**（无手指畸形、无字幕泄漏、无户外风声）
   4. **同一标杆能裂变出 5+ 条独立视频**（防 TikTok 查重）
-  5. 用户接受叙事差异化，但物理瑕疵（颜色/手指/角色）是硬阻断
+  5. 用户痛点：**3 秒完播率低** → hook 要强；视频不宜过长（工作流上限 30s）
 
-## 2. 架构总览
+## 2. 三种生成路径
+
+| 路径 | 入口 | 说明 | 状态 |
+|---|---|---|---|
+| **single_pass（传统单段）** | 🎬 生成 tab | 1 次 Seedance 直接出整条；reference_image + reference_video 驱动 | ✅ 稳定 |
+| **agentic_segments（LLM 智能分镜）** | 🎬 生成 tab 开关 | LLM 把脚本拆 N 段、每段精简 prompt；首段 multimodal_reference + 尾帧链式喂下一段首帧 → 拼接；可选参考音色音频统一各段口播音色 | ✅ 代码完成 |
+| **分步工作流（人机协同）** | 🧩 分步工作流 tab | 独立向导，预生成关键帧 → 各段视频**并行**出 → 拼接；每步可人工审核 / AI 辅助 / 自动托管 | ⚙️ 代码完成，未端到端实测 |
+
+> **before-after 模板模式已于 2026-05-28 整体删除**（含 `services/before-after.js`、`routes/before-after.js`、`gemini.js` 的 `deriveBeforeAfterTemplate` + `mode` 参数全链路、前端开关/概念助手/适用性警告）。before/after 这种 hook 现在用「分步工作流的可选尾帧」实现（首帧=before、尾帧=after），更灵活、无需专用支路。`benchmark-analyzer.js` 里 hook_type 枚举的 "before-after" 是参考视频分类项，保留。
+
+## 3. single_pass / agentic_segments 流程（🎬 生成 tab）
 
 ```
-用户提交（商品 + 参考视频 + 模式 + 时长 + variant_seed）
+用户提交（商品 + 参考视频 + generationMode + 时长 + variant_seed [+ 参考音色音频]）
    ↓
-Phase 1: 数据准备
-   ├─ TikHub 爬产品 → 上传 S3 拿稳定 URL（24h 缓存，curated 永久）
-   └─ Snaptik 解析 TikTok 视频 → 无水印直链
+Phase 1: 数据准备（TikHub 爬产品→S3；Snaptik 解析 TikTok→无水印直链）
    ↓
-Phase 2: Gemini 生成（AI Studio API key 直连，gemini-3.1-pro-preview，2 次调用）
-   ├─ Pass 1（temperature=0）: 视频 + 全部产品图 → video_analysis(含 shot_sequence) /
-   │   product_visual_features / narrative_dna / dominant_color / selected_image_indices /
-   │   compressed_script
-   └─ Pass 2: 仅选中图 + Pass 1 JSON → 写 Seedance prompt
-       ├─ normal 模式：消费 Pass 1 shot_sequence，按参考时间戳/动作/对白重写
-       └─ before-after 模式：走 deriveBeforeAfterTemplate 衍生模板（见 §4）
+Phase 2: Gemini 生成（gemini-3.1-pro-preview，2 次调用）
+   ├─ Pass 1（temp=0）: 视频+全部产品图 → video_analysis / product_visual_features /
+   │   narrative_dna / dominant_color / selected_image_indices / compressed_script
+   └─ Pass 2: 仅选中图 + Pass 1 JSON → 写 Seedance prompt（normal 流程）
    ↓
-Phase 3: 质量门禁
-   ├─ 程序化校验（违禁词 / 字数 / if-then 残留 / 多色泄漏）
-   └─ Gemini 二次评估（CLASS A 产品准确性 + CLASS B 物理畸形）→ 失败修订最多 2 次
+Phase 3: 质量门禁（程序化校验 + Gemini 二次评估，失败修订≤2 次）
    ↓
-Phase 4: 强制注入（代码硬拼接到 prompt 末尾，绕过 Gemini）
-   CHARACTER CONSISTENCY / NO ON-SCREEN TEXT / FACE & LIKENESS / REFERENCE BOUNDARY /
-   AUDIO ENVIRONMENT / ANATOMICAL ACCURACY / NO IMPROVISED DIALOGUE / NO MIRROR FLIP /
-   COLOR LOCK / PRODUCT REMINDER / PHYSICAL ANCHOR
+Phase 4: 强制注入块（代码硬拼接，绕过 Gemini 压缩）
    ↓
-Phase 5: ffmpeg 截 14s 参考片段 + 上传
+Phase 5: ffmpeg 截 14s 参考片段 + 上传（single_pass / agentic 首段用）
    ↓
-Phase 6: Seedance 2 (kie.ai) — 480p 9:16，reference_image_urls + reference_video_urls
+Phase 6: Seedance 2 (kie.ai 'bytedance/seedance-2')
+   ├─ single_pass：1 次出整条
+   └─ agentic_segments：buildAgenticSegmentPlanLLM 出 N 段 → 逐段生成
+       （首段 multimodal_reference + returnLastFrame → 尾帧作下一段 first_frame）→ ffmpeg 拼接
    ↓
 Phase 7: 异步评分（video_judge 8 维 + diff_judge 差异化）
 ```
 
-> 所有 Gemini 调用统一经 `gemini-retry.js`：502/503/429/网络错误退避重试 4 次。
+> 所有 Gemini 调用经 `gemini-retry.js`（502/503/429/网络错误退避重试 4 次）。
 
-## 3. 数据模型（PostgreSQL on AWS RDS）
+## 4. 分步工作流（🧩 分步工作流 tab）⭐ 本期重点
 
-5 张表：
-- `jobs` — 任务全状态 + jobStore 快照
-- `videos` — 每条 Seedance 视频 + prompt + narrative_dna + 二次评估 + 后评分
-- `products` — 产品缓存（24h 过期；curated 永久）；`*_image_colors` 是与 url 数组 index 对齐的 SKU 标签 JSON
-- `reference_videos` — 标杆视频库（含 ROI 等投流数据）
-- `my_templates` — 模板库：高转化视频 + prompt + 评分 + 播放/出单/CTR 指标
+**动机**：agentic 串行（等上一段视频出来再抽尾帧）太慢；一条 prompt 塞多分镜模型不专注。
+**核心收益**：关键帧用图像模型**预生成**（秒级）→ 各段视频**并行**出（每段用自己的首帧，不互等）。
 
-> RDS 网络延迟 ~2.5s/查询，批量操作必须合并（如 `batchSetImageColors` 把 53×3 次查询压成 2 次）。
+**状态机**（复用 job 持久化，`full_data` JSON blob；workflowId 作 jobId，`type:'workflow'`，无需改表）：
+```
+analyzing → await_scripts → await_model → generating_keyframes →
+await_keyframes → await_prompts → generating_videos → completed（任意步可 failed）
+```
 
-## 4. 生成模式矩阵（mode × isSameProduct）⭐ 重点
+**步骤 / UI**：
+1. **分析**：选产品（+ SKU 颜色筛选，防串色）+ 参考视频/TikTok 链接 + 时长 → `analyzeAndGeneratePrompt` + `buildAgenticSegmentPlanLLM` 出分段脚本
+2. **审核脚本**：各段可编辑；「🤖 AI 看看」判断+建议+改写，可采纳
+3. **选模特**：从模特库挑一个 / 随机
+4. **各段首帧**：image-to-image，参考图 = [模特定妆照, 产品图]；可审核/改提示词/重生成；**每段可选开尾帧**（默认关，用于 before/after 或段内运动控制）
+5. **审核视频提示词**：各段可编辑 + AI 辅助
+6. **并行出视频 + 拼接**：每段 `createVideoTask`（first_frame +可选 last_frame）并行 → `stitchSegments` 拼接成片
 
-两个维度：**模式**（normal / before-after）× **参考视频是否本产品**（isSameProduct）。
+**时长**：默认「自动」= 跟随参考视频实际时长（ffprobe，clamp [8,30]，TikTok 下载后量、失败回退 15）；用户可指定 8/10/15/20/25/30，**用户优先**。单段 ≤15s，更长靠多段相加（≤30s）。
 
-| 情景 | 结构骨架 | 台词内容来源 | 风格/节奏 | 状态 |
-|---|---|---|---|---|
-| **① normal + 同产品** | 参考视频 shot_sequence | 参考视频原台词逐字压缩 | 参考视频 | ✅ |
-| **② normal + 不同产品** | 参考 shot_sequence 骨架（时长/字数分布保留） | 按产品信息+概念全新写；参考台词被节奏模板抹掉（防泄漏） | 参考视频 | ✅ |
-| **③ before-after + 同产品** | 0:00-0:02 快切 hook + 0:02 后过渡 + 其余跟参考 shot_sequence | 参考视频真实台词压缩（跳过 hook 已讲的卖点） | 参考视频 | ✅ |
-| **④ before-after + 不同产品** | 同 ③ | 全新写（产品信息+选中卖点+概念）；参考台词节奏模板防泄漏 | 参考视频 narrative_dna | ✅ |
+**模特库**（`services/model-library.js`，存 `data/model-library.json`）：
+- 10 个美国市场画像（扩展自 `VARIANT_RECIPES`）；gpt-image-2 **text-to-image** 预生成**纯身份定妆照**（脸/身材/发型，中性内衣），产品在各段首帧再叠加
+- 预生成默认**只补缺失**（断点续生成）；`force` 才全量重生成
+- 顶部「🎭 模特库」常驻入口，可预生成/查看/随机
 
-**规律**：
-- 结构 → normal 全程跟参考视频；before-after 前 2 秒固定 hook，0:02 之后跟参考视频
-- 风格/节奏 → 四个都来自参考视频
-- 台词内容 → 只由 isSameProduct 决定（同产品=用真实台词，不同产品=全新写）
+**连贯性策略**：**全局资产锁定**（模特定妆照 + 产品图）而非链式首帧 —— 各段构图可完全不同（背面/正面/产品特写），模特和产品始终锁定。
 
-**关键点**：before-after 的 0:02 之后就是 normal 流程，所以 isSameProduct 在两个模式下**完全同义**。before-after 模式照常暴露 isSameProduct 开关，四宫格是完整的 4 格。
+**AI 辅助 / 自动托管**：每步可让 AI 判断+建议+改写（`services/workflow-ai.js` `aiReviewSegment`）；或「从这步起自动托管」`driveAutopilot` 一路跑到成片。
 
-**before-after 模板细节**（`deriveBeforeAfterTemplate`，基于 task3Lingerie 衍生，task3Lingerie 本体不动）：
-- 0:00-0:02：强制 LOOK A / LOOK B 每半秒快切 hook；LOOK B 用最刚性产品描述
-- COLOR 块升级：色名→视觉描述 + 反向排除（修 Warm Beige 渲成深棕）
-- 0:02 后：头 1-2 句过渡讲 hook 那个卖点（约 3 秒，只讲一次），之后跟参考 shot_sequence 讲其他卖点、跳过 hook 卖点
-- 二次评估仅 before-after 时注入「快切白名单」，普通任务 prompt 字节不变
+## 5. 数据模型（PostgreSQL on AWS RDS）
 
-**台词防泄漏 / 特点防失真**（②④ 共用）：
-- isSameProduct=false 时 Pass 1 JSON 注入前，台词内容替换成节奏模板
-- SHOT SEQUENCE 改写规则 #2 EXCEPTION B：参考动作若演示了本产品没有的特点（捏厚垫/解前扣/翻蕾丝…），替换为中性动作
-
-## 5. 功能模块（前端 5 个 tab）
-
-| Tab | 说明 |
-|---|---|
-| 🎬 生成 | 主流程：选品 → 选 SKU → 参考视频 → 模式 →（before-after 时用概念助手）→ 生成 |
-| 📦 产品管理 | 产品列表 / 加图删图 / SKU 打标 / AI 识别 SKU / AI 推荐最佳 SKU |
-| 📜 历史 | 任务历史 + 内联播放 + 评分细节 + 「存为模板」 |
-| 🛍 达人视频 | 达人视频库：筛选 + 「去生成」跳转预填 |
-| ⭐ 模板库 | 高转化视频 + 指标（播放/出单/CTR/转化率）|
-
-**before/after 概念助手**（before-after 模式专属）：
-1. AI 识别商品卖点（看主图+详情图+商品信息）→ 列出 4-6 个
-2. 用户勾选卖点 +（可选）填方向 → AI 生成 3 个 before/after 概念
-3. 概念只描述 0-2s 快切 hook，要求「半秒可辨」对比 → 选中自动填入补充说明框
-- 后端：`services/before-after.js` + `routes/before-after.js`
+5 张表（同前）：`jobs`（任务全状态 + jobStore 快照，工作流也存这里）/ `videos` / `products`（`*_image_colors` 是与 url index 对齐的 SKU 标签）/ `reference_videos` / `my_templates`。
+- **模特库不在 DB**：存 `backend/data/model-library.json`。
+- RDS ~2.5s/查询，批量操作必须合并。
 
 ## 6. 当前已知问题
 
-### 🔴 高优先级
-1. **手部畸形 ~70%**：ACTION SAFETY + PHYSICAL ANCHOR 已部署，接近 Seedance 物理上限，难再压
-2. **kie.ai 上游偶发超时**：建议失败任务自动重提 1 次
+### 🔴 高优先级 / 运维
+1. **nodemon 监听 .json → 后台任务被杀**：nodemon 默认 `watch *.* ext js,mjs,cjs,json`。模特库每生成一个就写 `data/model-library.json` → 触发后端重启 → 杀掉其余并行任务（kie 那边照常完成，但我们丢结果）。**现规避：后端用 plain `node server.js` 跑（无文件监听）**。代价：改后端代码需手动重启 node。`nodemon.json`（watch 白名单）已建但似乎未被读取，存疑。
+2. **手部畸形 ~70%**：接近 Seedance 物理上限。
+3. **kie.ai 上游偶发超时**：失败任务建议自动重提。
 
-### 🟢 低优先级
-3. `OLD_SINGLE_CALL` 函数仍在 gemini.js，导出但无人引用，可清理
-4. batch>1 用不上（单账号 + 反查重）
-
-### ⚠️ 待观察
-5. before-after 快切区 0:00-0:02 产品必有轻微漂移（快切固有代价，靠 0:02 后停留镜头保证产品准确性）
-6. before-after 模式实际转化表现待实战验证
+### ⚠️ 待观察 / 待办
+4. 图像生成偶尔很慢（实测 deep-skin-black 用了 5.5min，差点触 `waitForTask` 6min 上限）→ 建议把模特库/首帧的 `maxAttempts` 调大（如 100=10min）。
+5. **分步工作流尚未端到端实测**（到出片）：已验证图像链路（提交→轮询→下载→S3，格式 `resultJson.resultUrls[0]` 对图像也成立）+ 模特库 10/10 生成成功；脚本→首帧→出视频整链待真实跑一遍。
+6. 工作流暂无音色统一（agentic_segments 有 reference_audio，工作流未接）。
+7. `OLD_SINGLE_CALL` 死函数可清理；model-library.js 里加了诊断 console.log 可后续精简。
 
 ## 7. 关键设计决策
 
 | 决策 | 理由 |
 |---|---|
-| Pass 拆 1+2 | 大 payload 慢推理 + 小 payload 快撰写，质量↑ |
-| 强制注入块代码硬拼接 | Gemini 在长 prompt 会偷偷压缩规则 |
-| Pass 1 temperature=0 | 保证 shot_sequence 可复现，variant 只变 presenter |
-| shot_sequence 直接驱动（方案 D）| 替代废弃的 10 模板表（信息损失 90%）|
-| before-after 走独立衍生模板 | 不污染 task3Lingerie；mode 门控，普通任务零影响 |
-| before-after 保留 isSameProduct 开关 | 0:02 后就是 normal 流程，开关同义；四宫格完整 4 格 |
-| 全链路 Gemini 重试 | 一次瞬时 502 不再整个 job 失败 |
-| 不换视频模型 | Seedance 2 是唯一支持参考图的 image-to-video+audio 模型 |
+| 删除 before-after 模板支路 | 用「可选尾帧」通用实现 before/after，免专用支路污染主流程 |
+| 分步工作流预生成关键帧 | 各段视频可并行出，解决串行抽帧慢；并在花视频额度前层层人工把关 |
+| 连贯性用全局资产锁定（非链式首帧） | 各段构图不同（背面/产品特写时链式首帧无意义），靠统一模特图+产品图锁人/锁货 |
+| 模特库纯身份形象 + 预生成复用 | 跨产品复用，挑选零等待；产品在各段首帧叠加 |
+| 时长自动跟随参考视频（用户可覆盖） | 贴合"仿这条视频"，又尊重用户；3 秒完播痛点 → 上限 30s |
+| 每段精简 prompt（agentic/工作流） | 一条大 prompt 塞多分镜模型不专注 |
+| Pass 拆 1+2 / 强制注入块 / Pass1 temp=0 / 全链路重试 / 不换视频模型 | （同前，沿用）|
 
 ## 8. 关键文件位置
 
 | 文件 | 作用 |
 |---|---|
-| `backend/services/gemini.js` | Pass 1 + Pass 2 + 强制注入块 + deriveBeforeAfterTemplate |
-| `backend/services/gemini-retry.js` | 共享重试封装（全部 Gemini 调用接入）|
-| `backend/services/gemini-review.js` | 二次评估 + 修订（mode 感知）|
-| `backend/services/gemini-video-judge.js` | 视频后评分 |
-| `backend/services/gemini-color-tagger.js` | AI 识别 SKU + 推荐最佳 SKU |
-| `backend/services/before-after.js` | 卖点识别 + before/after 概念生成 |
-| `backend/services/db.js` | PostgreSQL + 5 张表 |
-| `backend/routes/generate.js` | 主流程编排（mode 透传）|
-| `backend/routes/product.js` | 商品爬取 + 产品管理 + 达人视频 API |
-| `backend/routes/templates.js` | 模板库 CRUD |
-| `backend/routes/before-after.js` | 卖点/概念接口 |
-| `frontend/src/App.jsx` | 单页应用 + 5 tab + before-after 开关/概念助手 |
-| `frontend/src/ProductManager.jsx` | 产品管理页 |
-| `frontend/src/HistoryView.jsx` | 历史页 + 存为模板 |
-| `frontend/src/AffiliateVideos.jsx` | 达人视频库 |
-| `frontend/src/MyTemplates.jsx` | 模板库页 |
+| `backend/services/gemini.js` | Pass 1 + Pass 2 + 强制注入块 + VARIANT_RECIPES（before-after 已移除）|
+| `backend/services/agentic-planner.js` | `buildAgenticSegmentPlanLLM`（LLM 分镜，maxDuration 可配）+ 规则版兜底 |
+| `backend/services/agentic-prompt-builder.js` | 每段精简 prompt（slim）+ 旧版兜底 |
+| `backend/services/agentic-stitcher.js` | 抽尾帧 + ffmpeg 拼接（支持音轨 a=1 + 按 resolution）|
+| `backend/services/model-library.js` | 模特库：10 画像 + 预生成（断点续）+ list/get |
+| `backend/services/workflow-ai.js` | 工作流 AI 辅助：审核脚本/提示词，返回 建议+改写 |
+| `backend/services/kieai.js` | `createVideoTask` + `createImageTask`（gpt-image-2 用 input_urls / seedream 用 image_urls）+ `parseTaskResult`(含 imageUrl) + `waitForTask` |
+| `backend/services/gemini-review.js` / `gemini-video-judge.js` | 二次评估 / 后评分（mode 参数已移除）|
+| `backend/routes/generate.js` | single_pass / agentic_segments 编排 |
+| `backend/routes/workflow.js` | 分步工作流全部端点 + 状态机 + 并行出视频/拼接 |
+| `backend/nodemon.json` | watch 白名单（存疑未生效；当前用 plain node 规避）|
+| `frontend/src/App.jsx` | 单页 + tabs（🧩 分步工作流 已接入；before-after 已移除）|
+| `frontend/src/WorkflowWizard.jsx` | 分步工作流向导页（模特库/产品+SKU/脚本/首尾帧/提示词/出片/AI辅助/托管）|
+| `frontend/src/{ProductManager,HistoryView,AffiliateVideos,MyTemplates,BenchmarkAnalyzer}.jsx` | 其余 tab |
 
-## 9. 商业经济学
+## 9. 前端 Tab
 
-- 每条 Seedance ¥12 + Gemini 全程 ~¥1-2 ≈ **每条 ¥13-14**
+🎬 生成（single_pass / agentic_segments 开关）· 🧩 分步工作流 · 📦 产品管理 · 📜 历史 · 🛍 达人视频 · ⭐ 模板库 · 标杆分析
+
+## 10. kie.ai 图像 API（gpt-image-2 / seedream）
+
+- 同 `/jobs/createTask` 端点；createTask 响应 `{code,msg,data:{taskId}}`（同视频）
+- text-to-image：`input{prompt,aspect_ratio[,quality,nsfw_checker]}`
+- image-to-image：参考图字段 **gpt-image-2 用 `input_urls`、seedream 用 `image_urls`**
+- 结果轮询 recordInfo：`data.state='success'` + `data.resultJson` → `resultUrls[0]`（图像/视频通用）
+
+## 11. 商业经济学
+
+- 每条 Seedance ¥12 + Gemini ~¥1-2 ≈ **¥13-14/条**；分步工作流另加图像生成（模特库一次性 + 每段首帧/可选尾帧）
 - 用户场景：单账号每天发 1-2 条
 
-## 10. Git 提交历史（最近）
+## 12. Git / 提交状态
 
+⚠️ **本期改动（before-after 删除 + agentic 升级 + 分步工作流 A→D + 模特库 + SKU + nodemon 规避）尚未提交 git**。最近已提交历史：
 ```
-d755bb1 feat: before-after 模板模式 + 概念助手 + 模板库 + 全链路 Gemini 重试
-589bf23 feat: 达人视频库 + 生成流程体验优化
-195e235 migrate database from SQLite to PostgreSQL (AWS RDS)
-ad7b911 chore: remove .claude from tracking, add to .gitignore
-25cabed fix: revert flat-lay experiment, restore standard presenter pipeline
+008f4d1 Skip S3 re-upload for product images already on hypit S3
+5e09b82 docs
+076f7f1 Add experimental agentic segment generation mode
+c6af0b5 视频解析能力
 ```
 
-## 11. 历史测试记录（阶段 4 烟测，方案 D 验证，2026-05-15）
-
-2 标杆 × 5 variant = 10 jobs，7 成 3 败。关键指标 vs 阶段 3 基线：
-- 颜色漂移率 80%→**0%** ✅　角色不连续 60%→**14%** ✅
-- 手指畸形 80%→71%（接近 Seedance 上限）
-- video_judge 5.8→6.14　character_consistency 5→8.57 ✅
-- 失败原因：construction↔edge_finish 矛盾（已修）、kie.ai 上游超时
-
-## 12. 根本事实
+## 13. 根本事实
 
 - **Seedance 2 是当前唯一可用的支持参考图的 image-to-video+audio 模型**，已在用上限
 - 物理瑕疵可靠 prompt 降频但无法消除；手部畸形接近模型上限
-- 给 Seedance 的参考视频是 14s 片段（非完整视频），全片叙事弧无法借鉴 —— Seedance 15.2s 上限决定的物理约束
+- 分步工作流的真正提速来自"预生成首帧 → 视频并行"，而非更快的单次生成
