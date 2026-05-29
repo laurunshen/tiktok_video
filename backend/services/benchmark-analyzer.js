@@ -1,6 +1,6 @@
 import { GoogleGenAI } from '@google/genai'
 import { readFile } from 'fs/promises'
-import { statSync } from 'fs'
+import { statSync, existsSync } from 'fs'
 import path from 'path'
 import { generateContentWithRetry } from './gemini-retry.js'
 import { transcribeVideo } from './audio-transcriber.js'
@@ -16,7 +16,7 @@ async function uploadVideoFileToGemini(videoPath) {
   const ext = path.extname(videoPath).toLowerCase()
   const mimeType = ext === '.mov' ? 'video/quicktime' : 'video/mp4'
   const fileSize = statSync(videoPath).size
-  console.log(`[benchmark] uploading video to Gemini Files (${(fileSize / 1024 / 1024).toFixed(1)} MB)`)
+  console.log(`[video-understanding] uploading video to Gemini Files (${(fileSize / 1024 / 1024).toFixed(1)} MB)`)
 
   const uploadedFile = await genai.files.upload({
     file: videoPath,
@@ -27,7 +27,7 @@ async function uploadVideoFileToGemini(videoPath) {
   for (let attempt = 0; file.state === 'PROCESSING' && attempt < 40; attempt++) {
     await new Promise(r => setTimeout(r, 3000))
     file = await genai.files.get({ name: file.name })
-    console.log(`[benchmark] Gemini file state ${file.state} (${attempt + 1})`)
+    console.log(`[video-understanding] Gemini file state ${file.state} (${attempt + 1})`)
   }
   if (file.state !== 'ACTIVE') throw new Error(`Gemini Files processing failed: ${file.state}`)
   return { uri: file.uri, mimeType, name: file.name }
@@ -41,6 +41,10 @@ async function frameToInlinePart(framePath) {
       data: buffer.toString('base64'),
     },
   }
+}
+
+function hasUsableFramePath(frame) {
+  return typeof frame?.path === 'string' && frame.path.length > 0 && existsSync(frame.path)
 }
 
 function buildFrameTimeline(frames) {
@@ -62,12 +66,12 @@ export async function analyzeBenchmarkVideo({ videoPath, frames, frameStats, dur
 
   const parts = [
     {
-      text: `You are a senior AI video creative director building a benchmark analyzer for high-quality AI TikTok commerce videos.
+      text: `You are a senior AI video creative director building a video understanding engine for high-quality AI TikTok commerce videos.
 
-Your job is NOT to summarize loosely. Extract a hard, reusable replication template.
+Your job is NOT to summarize loosely. Convert the video into one precise Director Timeline that can be read by a human producer and reused by a video generation prompt.
 
 Inputs:
-- The original benchmark video.
+- The original reference video.
 - Explicit ASR transcript with timestamps.
 - Extracted visual frames with timestamps. Hook frames are denser, body frames are 1 FPS, scene_change frames mark likely cuts/transitions.
 
@@ -90,27 +94,17 @@ Return ONLY valid JSON with this exact top-level schema:
       "start": 0,
       "end": 2,
       "role": "hook | pain_point | product_demo | proof | transition | CTA | other",
+      "intent": "the creative purpose of this segment",
       "visual": "what is visible",
+      "action": "body movement plus explicit hand position/gesture/contact, or hands not visible/idle",
+      "camera": "shot type + framing + angle + movement",
       "spoken_line": "spoken line from ASR or empty string",
-      "camera": "camera distance/movement/framing",
-      "action": "physical action",
-      "product_visibility": "none | partial | clear | close-up",
-      "replication_notes": "what to preserve when recreating"
-    }
-  ],
-  "shot_list": [
-    {
-      "start": 0,
-      "end": 2,
-      "shot_type": "close-up | medium | full-body | over-shoulder | product close-up | screen | other",
-      "camera": "specific camera behavior",
-      "action": "single executable action",
-      "spoken_line": "line aligned to this shot or empty string",
-      "product_visibility": "specific visibility and position",
+      "product_visibility": "none | partial | clear | close-up, with position in frame",
       "scene": "location/background",
       "lighting": "specific lighting",
       "motion_complexity": "low | medium | high",
-      "ai_generation_risk": "risk to avoid when generating"
+      "ai_generation_risk": "specific risk to avoid when generating",
+      "replication_notes": "what must be preserved when recreating"
     }
   ],
   "quality_factors": [
@@ -142,8 +136,10 @@ Return ONLY valid JSON with this exact top-level schema:
 Hard requirements:
 - Use timestamps in seconds.
 - Align spoken_line to the explicit ASR transcript. If no ASR line exists, use "".
-- Include product visibility in every timeline item and shot.
-- Make actions simple and executable. Flag complex hand/body actions as risks.
+- Include product visibility in every timeline item.
+- Camera must include the shot type/framing (for example close-up, medium close-up, medium, full-body, over-shoulder, product close-up), not only "static" or "handheld".
+- Make actions simple and executable. Always describe visible hand behavior: where each hand is, what it touches, whether it points/holds/pulls/gestures, or "hands not visible/idle" when there is no clear hand action.
+- Flag complex hand/body actions as risks.
 - Do not copy the presenter's identity. Describe transferable structure only.`,
     },
     {
@@ -154,7 +150,14 @@ Hard requirements:
     },
   ]
 
-  const cappedFrames = frames.slice(0, 60)
+  const cappedFrames = frames
+    .filter(hasUsableFramePath)
+    .slice(0, 60)
+  if (cappedFrames.length < Math.min(frames.length, 60)) {
+    console.warn(
+      `[video-understanding] skipped ${Math.min(frames.length, 60) - cappedFrames.length} frame(s) without readable image path`
+    )
+  }
   for (let i = 0; i < cappedFrames.length; i++) {
     const frame = cappedFrames[i]
     parts.push({ text: `\n[Frame ${i + 1} | ${frame.timestamp.toFixed(2)}s | ${frame.zone} | ${frame.source}]` })
@@ -164,16 +167,19 @@ Hard requirements:
   const response = await generateContentWithRetry(genai, {
     model: 'gemini-3.1-pro-preview',
     contents: [{ role: 'user', parts }],
-  }, { label: 'benchmark analyzer' })
+  }, { label: 'video understanding' })
 
   const text = response.candidates?.[0]?.content?.parts?.[0]?.text || ''
   const template = jsonFromText(text)
+  if (Array.isArray(template?.timeline) && !Array.isArray(template.shot_list)) {
+    template.shot_list = template.timeline
+  }
   const validation = validateBenchmarkTemplate(template)
 
   try {
     if (videoFile.name) await genai.files.delete({ name: videoFile.name })
   } catch (err) {
-    console.warn(`[benchmark] Gemini file cleanup skipped: ${err.message}`)
+    console.warn(`[video-understanding] Gemini file cleanup skipped: ${err.message}`)
   }
 
   return {

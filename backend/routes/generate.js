@@ -436,6 +436,11 @@ router.post('/', upload.fields([
     const userScript = req.body.userScript || ''
     const category = req.body.category || 'general'
     const productInfo = req.body.productInfo ? JSON.parse(req.body.productInfo) : null
+    const videoUnderstanding = req.body.videoUnderstanding
+      ? JSON.parse(req.body.videoUnderstanding)
+      : (req.body.benchmarkAnalysis
+        ? JSON.parse(req.body.benchmarkAnalysis)
+        : (req.body.benchmarkTemplate ? { template: JSON.parse(req.body.benchmarkTemplate) } : null))
     const generationMode = req.body.generationMode === 'agentic_segments' ? 'agentic_segments' : 'single_pass'
     // 同产品=用参考视频真实台词，不同产品=台词全新写
     const isSameProduct = req.body.isSameProduct !== '0'
@@ -461,9 +466,9 @@ router.post('/', upload.fields([
     const maxImages = 20
     const productImageUrls = scrapedImageUrls.slice(0, Math.max(0, maxImages - productImageFiles.length))
 
-    // 视频：本地上传 或 TikTok 链接，二选一
-    if (!referenceVideoFile && !tiktokVideoUrl) {
-      return res.status(400).json({ error: '请上传参考视频或填写 TikTok 视频链接' })
+    // 参考结构：视频理解结果 / 本地上传 / TikTok 链接，三选一
+    if (!videoUnderstanding?.template && !referenceVideoFile && !tiktokVideoUrl) {
+      return res.status(400).json({ error: '请提供参考结构：视频理解结果、参考视频文件或 TikTok 视频链接' })
     }
     if (productImageFiles.length === 0 && productImageUrls.length === 0) {
       return res.status(400).json({ error: '请上传产品图或填写商品链接（用于自动抓取产品图）' })
@@ -494,6 +499,8 @@ router.post('/', upload.fields([
       referenceVideoAuthor: extractTikTokAuthor(tiktokVideoUrl),
       category, isSameProduct, duration, resolution,
       batchCount, userDescription, variantSeed, generationMode,
+      videoUnderstandingEnabled: !!videoUnderstanding?.template,
+      videoUnderstandingSource: videoUnderstanding?.sourceName || null,
     }
     saveJob(global.jobStore[jobId]).catch(e => console.warn('[DB] saveJob error:', e.message))
 
@@ -533,9 +540,11 @@ router.post('/', upload.fields([
         console.log(`[${jobId}] 使用商品链接图片，跳过上传`)
       }
 
-      setStep(1, generationMode === 'agentic_segments'
-        ? 'Gemini 分析参考视频 + 筛选图片 + 生成 Agent 基础提示词'
-        : 'Gemini 分析参考视频 + 筛选图片 + 生成提示词')
+      setStep(1, videoUnderstanding?.template
+        ? 'Gemini 复用视频理解结构 + 筛选图片 + 生成提示词'
+        : (generationMode === 'agentic_segments'
+          ? 'Gemini 分析参考视频 + 筛选图片 + 生成 Agent 基础提示词'
+          : 'Gemini 分析参考视频 + 筛选图片 + 生成提示词'))
       console.log(`[${jobId}] variantSeed=${variantSeed ?? '无'}`)
       const geminiResult = await analyzeAndGeneratePrompt({
         videoFilePath: referenceVideoFile?.path,
@@ -549,6 +558,7 @@ router.post('/', upload.fields([
         productInfo,
         isSameProduct,
         variantSeed,
+        videoUnderstanding,
       })
       console.log(`[${jobId}] 类目: ${geminiResult.video_analysis?.product_category}，选中图片: ${geminiResult.selected_image_indices}`)
 

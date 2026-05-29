@@ -109,6 +109,47 @@ function describeStep(label) {
   return { icon: '⚙️', hint: '' }
 }
 
+function QualityGateMini({ job }) {
+  const autoFixes = job?.autoFixes || []
+  const validationIssues = job?.validationReport?.issues || []
+  const reviewIssues = job?.reviewReport?.issues || []
+  if (autoFixes.length === 0 && validationIssues.length === 0 && reviewIssues.length === 0) return null
+
+  const issueBox = issue => ({
+    marginTop: 5,
+    padding: 7,
+    borderRadius: 6,
+    background: issue.severity === 'critical' ? '#fff1f2' : '#fffbeb',
+    border: `1px solid ${issue.severity === 'critical' ? '#fecdd3' : '#fde68a'}`,
+    color: issue.severity === 'critical' ? '#9f1239' : '#92400e',
+    fontSize: 12,
+    lineHeight: 1.45,
+  })
+
+  return (
+    <div style={{ marginTop: 10, padding: 9, background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: 6 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: '#374151' }}>质量门禁</div>
+      {autoFixes.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 12, color: '#166534' }}>
+          已自动修复 {autoFixes.length} 项：{autoFixes.slice(-3).map(f => f.field).join('、')}
+        </div>
+      )}
+      {validationIssues.slice(0, 4).map((issue, i) => (
+        <div key={`v-${i}`} style={issueBox(issue)}>
+          <strong>程序化校验 · {issue.severity === 'critical' ? '严重' : '提醒'} · {issue.field}</strong>
+          <div>{issue.problem}</div>
+        </div>
+      ))}
+      {reviewIssues.slice(0, 4).map((issue, i) => (
+        <div key={`r-${i}`} style={issueBox(issue)}>
+          <strong>Gemini 评估 · {issue.severity === 'critical' ? '严重' : '提醒'} · {issue.field}</strong>
+          <div>{issue.problem}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function fmtElapsed(seconds) {
   const m = Math.floor(seconds / 60)
   const s = seconds % 60
@@ -711,6 +752,7 @@ export default function HistoryView() {
                           )}
                         </div>
                       )}
+                      <QualityGateMini job={detail.job} />
                     </>
                   )}
                 </div>

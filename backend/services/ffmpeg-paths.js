@@ -34,14 +34,18 @@ function resolveExecutable(exeName, envVarName) {
 }
 
 export function resolveFfmpegPath() {
-  return resolveExecutable('ffmpeg.exe', 'FFMPEG_PATH')
+  const exeName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
+  return resolveExecutable(exeName, 'FFMPEG_PATH')
 }
 
 export function resolveFfprobePath() {
-  return resolveExecutable('ffprobe.exe', 'FFPROBE_PATH')
+  const exeName = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe'
+  return resolveExecutable(exeName, 'FFPROBE_PATH')
 }
 
 export function ffmpegInstallHint() {
-  return 'ffmpeg not found. Install ffmpeg and make sure ffmpeg.exe is available in PATH, or set FFMPEG_PATH/FFPROBE_PATH in backend/.env to the full exe paths.'
+  if (process.platform === 'win32') {
+    return 'ffmpeg not found. Install ffmpeg and make sure ffmpeg.exe is available in PATH, or set FFMPEG_PATH/FFPROBE_PATH in backend/.env to the full exe paths.'
+  }
+  return 'ffmpeg not found. Install ffmpeg and make sure ffmpeg/ffprobe are available in PATH, or set FFMPEG_PATH/FFPROBE_PATH in backend/.env to full binary paths.'
 }
-

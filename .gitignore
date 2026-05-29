@@ -32,7 +32,9 @@ backend/logs/
 .claude/
 
 # Misc shell brace-expansion accident
-{backend/
+[{]backend/
+node.json
+exports/
 
 # Temporary
 *.tmp

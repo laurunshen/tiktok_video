@@ -25,12 +25,15 @@ const upload = multer({
   },
 })
 
-router.post('/analyze', upload.single('benchmarkVideo'), async (req, res) => {
-  const videoFile = req.file
+router.post('/analyze', upload.fields([
+  { name: 'benchmarkVideo', maxCount: 1 },
+  { name: 'video', maxCount: 1 },
+]), async (req, res) => {
+  const videoFile = req.files?.benchmarkVideo?.[0] || req.files?.video?.[0]
   let frameDir = null
 
   try {
-    if (!videoFile) return res.status(400).json({ error: 'Please upload benchmarkVideo' })
+    if (!videoFile) return res.status(400).json({ error: 'Please upload video' })
 
     const frameResult = await extractBenchmarkFrames(videoFile.path, {
       baseFps: Number(req.body.baseFps) || 4,
