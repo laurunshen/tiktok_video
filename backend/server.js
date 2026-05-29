@@ -48,6 +48,7 @@ app.use('/api/product', productRouter)
 app.use('/api/templates', templatesRouter)
 app.use('/api/benchmark', benchmarkRouter)
 app.use('/api/workflow', workflowRouter)
+app.use('/api/video-understanding', benchmarkRouter)
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() })

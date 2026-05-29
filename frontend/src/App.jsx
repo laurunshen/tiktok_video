@@ -5,6 +5,7 @@ import AffiliateVideos from './AffiliateVideos.jsx'
 import MyTemplates from './MyTemplates.jsx'
 import BenchmarkAnalyzer from './BenchmarkAnalyzer.jsx'
 import WorkflowWizard from './WorkflowWizard.jsx'
+import VideoUnderstanding from './VideoUnderstanding.jsx'
 
 const API = '/api'
 
@@ -106,7 +107,7 @@ const CATEGORIES = [
 const REGIONS = ['SG', 'US', 'GB', 'MY', 'TH', 'PH', 'VN', 'ID', 'AU']
 
 export default function App() {
-  const [tab, setTab] = useState('generate')  // 'generate' | 'products' | 'history' | 'affiliate'
+  const [tab, setTab] = useState('generate')  // 'generate' | 'understanding' | 'products' | 'history' | 'affiliate'
   const [cachedProducts, setCachedProducts] = useState([])
   // 选中缓存产品后的颜色过滤
   const [productSkuColor, setProductSkuColor] = useState('')  // '' = 不过滤；其他 = 只用该颜色的图
@@ -129,6 +130,7 @@ export default function App() {
   const [benchmarkVideos, setBenchmarkVideos] = useState([])
   const [showBenchmarks, setShowBenchmarks] = useState(false)
   const [loadingBenchmarks, setLoadingBenchmarks] = useState(false)
+  const [videoUnderstanding, setVideoUnderstanding] = useState(null)
   const [batchCount, setBatchCount] = useState(1)
   const [resolution, setResolution] = useState('480p')
   const [duration, setDuration] = useState(15)
@@ -347,13 +349,13 @@ export default function App() {
   useEffect(() => () => stopTimers(), [stopTimers])
 
   const handleSubmit = async () => {
-    // 视频：本地上传 或 TikTok 链接，二选一即可
-    const hasVideo = refVideo[0] || tiktokVideoUrl.trim()
+    // 参考结构：视频理解结果 / 本地上传 / TikTok 链接，三选一即可
+    const hasReferenceStructure = videoUnderstanding?.template || refVideo[0] || tiktokVideoUrl.trim()
     // 产品图：本地上传 或 商品链接抓取，二选一即可
     const hasProductImages = images.length > 0 || (productInfo && (productInfo.mainImageUrls?.length > 0 || productInfo.detailImageUrls?.length > 0))
 
-    if (!hasVideo) {
-      setError('请提供参考视频（上传文件或填写 TikTok 链接）')
+    if (!hasReferenceStructure) {
+      setError('请提供参考结构：去「视频理解」生成结果，或上传参考视频 / 填写 TikTok 链接')
       return
     }
     if (!hasProductImages) {
@@ -374,6 +376,7 @@ export default function App() {
     if (generationMode === 'agentic_segments' && refAudio[0]) fd.append('referenceAudio', refAudio[0])
     if (variantSeed) fd.append('variantSeed', variantSeed)
     if (skipReferenceVideo) fd.append('skipReferenceVideo', '1')
+    if (videoUnderstanding?.template) fd.append('videoUnderstanding', JSON.stringify(videoUnderstanding))
     fd.append('resolution', resolution)
     fd.append('duration', duration)
     try {
@@ -423,6 +426,7 @@ export default function App() {
     setProductUrl(''); setProductInfo(null); setProductId(null); setProductError(null); setIsSameProduct(true)
     setProductSkuColor(''); setProductColorInventory(null); setProductAllImages(null)
     setBenchmarkVideos([]); setShowBenchmarks(false)
+    setVideoUnderstanding(null)
     setGenerationMode('single_pass')
     setRefAudio([])
     setVariantSeed(null)
@@ -435,6 +439,7 @@ export default function App() {
     stopTimers()
     setRefVideo([])
     setTiktokVideoUrl('')
+    setVideoUnderstanding(null)
     setJobId(null); setJobStatus(null); setLoading(false)
     setCurrentStep(-1); setError(null); setWaitSec(0)
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -474,7 +479,7 @@ export default function App() {
         <p style={s.sub}>选产品 + 参考视频 → AI 自动分析风格并生成视频</p>
 
         <div style={s.tabBar}>
-          <button style={s.tabBtn(tab === 'benchmark')} onClick={() => setTab('benchmark')}>标杆分析</button>
+          <button style={s.tabBtn(tab === 'understanding')} onClick={() => setTab('understanding')}>视频理解</button>
           <button style={s.tabBtn(tab === 'generate')} onClick={() => setTab('generate')}>🎬 生成视频</button>
           <button style={s.tabBtn(tab === 'workflow')} onClick={() => setTab('workflow')}>🧩 分步工作流</button>
           <button style={s.tabBtn(tab === 'products')} onClick={() => setTab('products')}>📦 产品管理</button>
@@ -510,7 +515,15 @@ export default function App() {
           />
         </div>
 
-        <div style={{ display: tab === 'benchmark' ? '' : 'none' }}><BenchmarkAnalyzer /></div>
+        <div style={{ display: tab === 'understanding' ? '' : 'none' }}>
+          <VideoUnderstanding
+            onUseUnderstanding={payload => {
+              setVideoUnderstanding(payload)
+              setTab('generate')
+              window.scrollTo({ top: 0, behavior: 'smooth' })
+            }}
+          />
+        </div>
 
         <div style={{ display: tab === 'workflow' ? '' : 'none' }}><WorkflowWizard /></div>
 
@@ -746,6 +759,39 @@ export default function App() {
                   })}
                 </div>
               )}
+            </div>
+          )}
+        </div>
+
+        {/* 视频理解结构 */}
+        <div style={s.card}>
+          <div style={s.cardTitle}>视频理解结构</div>
+          {videoUnderstanding?.template ? (
+            <div style={{ padding: 12, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, fontSize: 13 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+                <div>
+                  <div style={{ fontWeight: 700, color: '#15803d' }}>
+                    已应用：{videoUnderstanding.sourceName || 'uploaded video'}
+                  </div>
+                  <div style={{ marginTop: 4, color: '#166534', fontSize: 12 }}>
+                    Hook: {videoUnderstanding.template?.hook_type || 'unknown'} · Timeline {videoUnderstanding.template?.timeline?.length || videoUnderstanding.template?.shot_list?.length || 0}
+                    {videoUnderstanding.duration ? ` · ${Number(videoUnderstanding.duration).toFixed(1)}s` : ''}
+                  </div>
+                  <div style={{ marginTop: 6, color: '#64748b', fontSize: 12 }}>
+                    生成时会复用这份镜头结构、节奏和产品露出方式；产品图和安全规则仍然优先。
+                  </div>
+                </div>
+                <button
+                  style={{ ...s.btnGhost, padding: '6px 12px', fontSize: 12, flexShrink: 0 }}
+                  onClick={() => setVideoUnderstanding(null)}
+                >
+                  清除
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ padding: 12, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, color: '#64748b' }}>
+              未应用。去「视频理解」分析视频后，点击“作为参考结构用于生成”会显示在这里。
             </div>
           )}
         </div>

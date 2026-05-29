@@ -6,6 +6,7 @@ import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import axios from 'axios'
 import { generateContentWithRetry } from './gemini-retry.js'
+import { buildVideoUnderstandingBrief } from './video-understanding-brief.js'
 
 // 用 AI Studio API key 直连（key 绑定到 GCP 项目 eternal-concept-492907-q3，仍烧 Cloud 赠金）
 // 之前走 Vertex（user-account ADC）会因 RAPT 政策每隔 16h-几周强制重登 → 已弃
@@ -708,6 +709,9 @@ Return ONLY this valid JSON, no markdown fences, no explanation:
 // 把视频准备成 inline part（如果是 URL 先下载到本地临时文件）
 async function prepareVideoPart(videoUrl, videoFilePath) {
   let tmpVideoPath = null
+  if (!videoUrl && !videoFilePath) {
+    return { videoPart: null, tmpVideoPath: null }
+  }
   if (videoUrl) {
     console.log(`  [Gemini] 下载视频...`)
     tmpVideoPath = path.join(os.tmpdir(), `${uuidv4()}.mp4`)
@@ -886,6 +890,7 @@ ${silhouetteEnum}
 // ==== Pass 1: 分析 ====
 async function geminiPass1Analyze({
   videoPart,
+  videoUnderstanding = null,
   labelParts,
   totalImages,
   productInfoText,
@@ -896,14 +901,21 @@ async function geminiPass1Analyze({
   userDescription = '',
 }) {
   const parts = []
+  const understandingBrief = videoUnderstanding?.template
+    ? buildVideoUnderstandingBrief(videoUnderstanding.template)
+    : ''
+  const transcriptText = videoUnderstanding?.transcript
+    ? `\n=== VIDEO UNDERSTANDING TRANSCRIPT ===\n${JSON.stringify(videoUnderstanding.transcript, null, 2)}\n=== END TRANSCRIPT ===`
+    : ''
+
   parts.push({
     text: `You are an expert AI video production analyst for e-commerce UGC videos.
 
 This is PASS 1 of 2 — your job is ANALYSIS ONLY. A second pass will write the actual video generation prompt later, using your structured output. Focus all your attention on accurate observation, not creative writing.
 
-First, here is the REFERENCE VIDEO to analyze:`,
+${videoPart ? 'First, here is the REFERENCE VIDEO to analyze:' : `First, use this precomputed VIDEO UNDERSTANDING result as the reference structure source. It replaces the raw video for this pass, so preserve its timing, shot roles, spoken structure, hook logic, camera style, and risk notes while still adapting all product facts to the current product images.\n\n${understandingBrief || '(No video understanding brief supplied.)'}${transcriptText}`}`,
   })
-  parts.push(videoPart)
+  if (videoPart) parts.push(videoPart)
   parts.push({ text: `\nNext, here are ${totalImages} PRODUCT IMAGES to choose from (numbered 1..${totalImages}):` })
   for (const { labelText, inlinePart } of labelParts) {
     parts.push({ text: labelText })
@@ -919,10 +931,12 @@ ${scriptModeInstruction}
 
 === YOUR ANALYSIS TASKS ===
 
-TASK 1 - Transcribe and analyze the reference video:
+TASK 1 - Transcribe and analyze the reference video or video-understanding brief:
 
 Step 1a — Full word-for-word transcript:
-Listen carefully and transcribe EVERY spoken word in the video into English, verbatim. Include filler words ("um", "like", "honestly"), pauses marked with "...", and natural interjections.
+${videoPart
+  ? 'Listen carefully and transcribe EVERY spoken word in the video into English, verbatim. Include filler words ("um", "like", "honestly"), pauses marked with "...", and natural interjections.'
+  : 'Use the provided VIDEO UNDERSTANDING TRANSCRIPT if present. If no transcript is present, infer a compact spoken structure from the brief and mark uncertain exact wording as paraphrase.'}
 ${isSameProduct
   ? 'This transcript will be compressed into the final script in Pass 2 — preserve it accurately.'
   : 'This transcript is a STYLE REFERENCE ONLY — extract speaking patterns, not content.'}
@@ -1463,6 +1477,7 @@ export async function analyzeAndGeneratePrompt({
   productInfo = null,
   isSameProduct = true,
   variantSeed = null,  // 1-5 选不同的模特+场景配方，避免标杆复用时被查重
+  videoUnderstanding = null,
 }) {
   const variantRecipe = getVariantRecipe(variantSeed)
   if (variantRecipe) {
@@ -1500,6 +1515,7 @@ The reference video is NOT for the same product — it is used as a STYLE REFERE
     console.log(`  [Gemini] === Pass 1: 分析视频 + 选图 + 提取特征 ===`)
     pass1Result = await geminiPass1Analyze({
       videoPart,
+      videoUnderstanding,
       labelParts,
       totalImages,
       productInfoText,
