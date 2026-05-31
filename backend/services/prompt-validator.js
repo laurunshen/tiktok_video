@@ -32,6 +32,7 @@ export function validateGeminiOutput(geminiResult, { targetDuration, finalRefere
   const prompt = geminiResult.seedance_prompt || ''
   const script = geminiResult.compressed_script || ''
   const features = geminiResult.product_visual_features || {}
+  const slimMode = Boolean(geminiResult.slim_mode)
 
   // 1. 产品图必须非空
   if (!finalReferenceImageUrls || finalReferenceImageUrls.length === 0) {
@@ -48,7 +49,7 @@ export function validateGeminiOutput(geminiResult, { targetDuration, finalRefere
   // 内衣类目额外要求 edge_finish / underwire_profile / fabric_drape
   const lingerieKeywords = /bra|lingerie|shapewear|underwire|cup|plunge/i
   const productCategory = (geminiResult.video_analysis?.product_category || '') + ' ' + (features.silhouette || '')
-  if (lingerieKeywords.test(productCategory)) {
+  if (lingerieKeywords.test(productCategory) && !slimMode) {
     for (const f of ['edge_finish', 'underwire_profile', 'fabric_drape']) {
       if (!features[f] || features[f].trim() === '' || features[f].toLowerCase() === 'null') {
         issues.push({ severity: 'warning', field: `product_visual_features.${f}`, problem: `内衣类目缺少 ${f} 字段，可能导致细节失真` })

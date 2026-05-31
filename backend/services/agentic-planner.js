@@ -113,25 +113,25 @@ export function buildAgenticSegmentPlan({
   }
 }
 
-// 把 LLM 输出的 segments 规整成可执行计划：clamp 每段时长、按比例归一到 totalDuration、
-// 强制第 1 段走 multimodal_reference 并返回尾帧、后续段走 first_frame_continue 链式衔接。
+// 把 LLM 输出的 segments 规整成可执行计划：clamp 每段时长、按比例归一到 totalDuration。
+// v2 不再强依赖尾帧接力；各段会使用预生成首帧 + 全局资产锁定并行生成。
 function normalizePlanSegments(rawSegments, totalDuration) {
   let segs = Array.isArray(rawSegments)
     ? rawSegments.filter(s => s && (safeStr(s.segmentPrompt) || safeStr(s.focus) || safeStr(s.scriptExcerpt)))
     : []
   if (segs.length < 2) return null
 
-  const maxSegments = Math.max(2, Math.min(8, Math.floor(totalDuration / 4)))
+  const maxSegments = Math.max(2, Math.min(4, Math.floor(totalDuration / 5)))
   if (segs.length > maxSegments) segs = segs.slice(0, maxSegments)
 
   // clamp 原始时长后按比例归一到 totalDuration
-  const raw = segs.map(s => Math.min(Math.max(Math.round(Number(s.duration) || 0), 4), 15))
+  const raw = segs.map(s => Math.min(Math.max(Math.round(Number(s.duration) || 0), 5), 15))
   const sum = raw.reduce((a, b) => a + b, 0) || 1
-  let durations = raw.map(d => Math.max(4, Math.round((d / sum) * totalDuration)))
-  // 把累计取整误差并到最后一段，并保持 4-15 边界
+  let durations = raw.map(d => Math.max(5, Math.round((d / sum) * totalDuration)))
+  // 把累计取整误差并到最后一段，并保持 5-15 边界
   const diff = totalDuration - durations.reduce((a, b) => a + b, 0)
   const lastIdx = durations.length - 1
-  durations[lastIdx] = Math.min(15, Math.max(4, durations[lastIdx] + diff))
+  durations[lastIdx] = Math.min(15, Math.max(5, durations[lastIdx] + diff))
 
   return segs.map((s, i) => {
     const isFirst = i === 0
@@ -141,13 +141,13 @@ function normalizePlanSegments(rawSegments, totalDuration) {
       role: safeStr(s.role) || (isFirst ? 'hook' : isLast ? 'body_cta' : `segment_${i + 1}`),
       duration: durations[i],
       focus: safeStr(s.focus),
-      seedanceMode: isFirst ? 'multimodal_reference' : 'first_frame_continue',
+      seedanceMode: 'keyframe_reference',
       scriptExcerpt: safeStr(s.scriptExcerpt),
       segmentPrompt: safeStr(s.segmentPrompt),
       actionPolicy: 'low-risk',
-      returnLastFrame: !isLast,
+      candidates: isFirst ? 3 : 1,
+      returnLastFrame: false,
     }
-    if (!isFirst) seg.firstFrameSource = `segment_${i}_last_frame`
     return seg
   })
 }
@@ -178,7 +178,7 @@ export async function buildAgenticSegmentPlanLLM({ targetDuration, geminiResult 
   try {
     const va = geminiResult.video_analysis || {}
     const dna = geminiResult.narrative_dna || {}
-    const maxSegments = Math.max(2, Math.min(8, Math.floor(totalDuration / 4)))
+    const maxSegments = Math.max(2, Math.min(4, Math.floor(totalDuration / 5)))
     const lockBits = Object.entries(globalLocks)
       .filter(([, v]) => v)
       .map(([k, v]) => `${k}=${v}`)
@@ -191,8 +191,9 @@ GOAL: each segment must focus on exactly ONE thing so the video model is not ove
 
 CONSTRAINTS:
 - Output between 2 and ${maxSegments} segments.
-- Each segment duration is an integer between 4 and 15 seconds; the durations should sum to about ${totalDuration}.
+- Each segment duration is an integer between 5 and 15 seconds; the durations should sum to about ${totalDuration}.
 - Segment 1 is the hook. The last segment ends with a short CTA.
+- Continuity comes from global asset locks: the same model identity image and the same product reference images will be fed to every segment. Do NOT rely on previous-segment last-frame handoff.
 - For each segment write a SELF-CONTAINED, CONCISE seedance prompt ("segmentPrompt") that describes ONLY that segment's single action/beat plus the minimum shared visual anchors needed for continuity (same presenter identity, same room, same lighting, same product, handheld phone-video style). DO NOT include a full multi-shot timeline, do NOT describe other segments, do NOT restate every rule. Keep each segmentPrompt tight and focused — this is the whole point.
 - Split the dialogue ("scriptExcerpt") along natural sentence/semantic boundaries, never mid-sentence.
 

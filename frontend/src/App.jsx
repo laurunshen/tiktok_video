@@ -833,14 +833,14 @@ export default function App() {
                 }}>
                 Agent 分段实验<br/>
                 <span style={{ fontSize: 10, fontWeight: 400, color: generationMode === 'agentic_segments' ? '#2563eb' : '#9ca3af' }}>
-                  LLM 智能分镜，每段聚焦一个卖点，带口播音频
+                  LLM 分镜 + 关键帧锁定，各段并行生成
                 </span>
               </button>
             </div>
             {generationMode === 'agentic_segments' && (
               <div style={{ marginTop: 8 }}>
                 <div style={{ fontSize: 11, color: '#1d4ed8', marginBottom: 8 }}>
-                  由 LLM 读脚本决定分几段、每段聚焦什么；首段用参考图 + 参考视频建立风格，后段用上一段末帧续写；若总时长小于 10 秒，会自动回退成 1 段。
+                  由 LLM 决定分几段、每段聚焦什么；系统用统一模特定妆照 + 产品图预生成各段首帧，再并行出视频并快切拼接。模特库为空时会自动回退旧的尾帧接力。
                 </div>
                 <label style={s.label}>参考音色音频（可选）</label>
                 <div style={{ fontSize: 11, color: '#6b7280', margin: '2px 0 6px' }}>

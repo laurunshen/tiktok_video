@@ -29,6 +29,7 @@ import templatesRouter from './routes/templates.js'
 import benchmarkRouter from './routes/benchmark.js'
 import workflowRouter from './routes/workflow.js'
 import { initDb } from './services/db.js'
+import { startJobRecoveryLoop } from './services/job-recovery.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -38,6 +39,7 @@ await mkdir('./uploads', { recursive: true })
 
 // 初始化数据库（建表 + 迁移 + 清僵尸 job）
 await initDb()
+startJobRecoveryLoop()
 
 app.use(cors({ origin: 'http://localhost:5173' }))
 app.use(express.json())

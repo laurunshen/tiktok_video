@@ -1,658 +1,259 @@
-# Agent 分段生成模式设计与落地规划
+# Agent 分段生成模式设计 v2
 
-> 用途：定义“Agent 分段生成模式”与当前传统单段模式的差异、核心逻辑、接口设计、实施步骤与实验标准。
-> 核心原则：不是简单把 Seedance 多调用几次，而是先规划结构，再按段生成、按段检查、最后拼接。
+> 用途：定义「Agent 分段生成视频」的设计原则、总链路、Planner 输出、质检与拼接策略，作为后续开发的蓝图。
+> 一句话：不是把 Seedance 多调几次，而是 **先规划结构 → 每段只干一件事 → 各段并行生成 → 段级质检 → 快切拼接**。
 
-## 1. 为什么要做这个模式
+> **修订说明（v1 → v2，2026-05-30）**：v1 早期设计稿有三处已被分步工作流（WorkflowWizard）的实践推翻，v2 予以纠正——
+> 1. **连续性**：v1 主打「首帧接力（上段尾帧→下段首帧）」；v2 改为以 **「全局资产锁定」为主**（统一模特定妆照 + 产品图锁人锁货），首帧接力降为可选。
+> 2. **架构**：v1 是 **串行**（等上段出完抽尾帧再做下段）；v2 改为 **并行**（预生成各段首帧 → 各段视频同时出），速度翻倍。
+> 3. **拼接**：v1 追求「无缝拼接」；v2 放弃这个做不到的目标，**拥抱 jump cut 快切**（本就是 TikTok 语言）。
+> 另：手指畸形已从「零容忍」降级（见 `PROJECT_STATUS.md` §7）；段级质检复用现成 `gemini-video-judge`。
 
-当前主流程是：
+---
 
-```text
-商品图 + 参考视频
-  -> Gemini Pass 1 分析
-  -> Gemini Pass 2 写完整 Seedance prompt
-  -> 调用 1 次 Seedance
-  -> 输出 1 条 13-15s 视频
-```
+## 1. 为什么要分段
 
-这个模式的优点是链路简单、成本可控，但它有一个天然问题：
+当前单段主流程：商品图 + 参考视频 → Gemini 分析 → 写一条完整 Seedance prompt → 1 次出整条 13-15s 视频。
 
-```text
-同一条 13-15 秒视频里，Seedance 需要同时维持：
-- 同一个人
-- 同一个产品
-- 同一个颜色
-- 复杂动作
-- 参考视频节奏
-- 连续对白
-```
-
-变量太多时，模型常见失败表现是：
+它的天然问题：同一条长视频里，模型要同时维持同一个人、同一个产品、同一种颜色、复杂动作、参考节奏、连续对白——变量太多就会：
 
 - 前半段正常，后半段开始漂
-- 产品颜色、结构、材质逐渐跑偏
-- 手部或身体在某个动作处崩坏
-- 参考视频结构在中后段失真
-- 整条失败后只能整条重生成，不能局部修复
+- 产品颜色 / 结构 / 材质逐渐跑偏
+- 整条失败只能整条重生成，不能局部修复
 
-因此需要一个和传统模式并行的新模式：
+分段模式要解决的不是「所有问题」，而是优先这四个：
 
-```text
-Agent 分段生成模式
-```
+1. 长视频中后段的人物 / 产品漂移 → 每段时长短，变量少
+2. 单次失败整条作废 → 失败只影响某一段，可局部重试
+3. hook 和主体段难度差异大 → hook 单独拎出来强化（直击「3 秒完播」痛点）
+4. 参考结构分析出来了却没法逐段执行 → Planner 按段分配
 
-它的目标不是“更复杂”，而是：
+它不替代单段模式，而是作为并行的另一条路径，单段模式继续作为简单场景和兜底。
 
-- 把一条长视频拆成更稳定的几个可控片段
-- 让系统自己决定每段应该生成什么
-- 让失败只影响某一段，而不是整条报废
-- 在保证产品准确性的前提下，提升结构复刻和视觉稳定性
+---
 
-## 2. 和传统模式的区别
+## 2. v2 的三块基石（和 v1 最大的不同）
 
-### 传统模式
+整个 v2 建立在三个被实践验证过的原则上：
 
-```text
-Reference video + product images
-  -> 1 个完整 prompt
-  -> 1 次 Seedance
-  -> 1 条成片
-```
+### 基石 1：连续性靠「全局资产锁定」，不靠首帧接力
 
-特点：
+- **做法**：先定一套全局资产——一张统一的**模特定妆照**（锁脸/身材/发型）+ 一组**产品图**（锁货），**每一段都喂这同一套资产**。
+- **为什么不靠首帧接力**：机器从一张静止首帧续生成时，不知道前一段人在干嘛 → 会有「重新启动」的微卡顿；而且要求上段停在「稳定居中」的画面才好接，反而让 hook 结尾变呆照、显假。
+- **好处**：各段构图可以完全不同（正面 / 背面 / 产品特写），人和货始终锁定。首帧接力降为**可选**，只在段内运动控制或 before/after 这类需要时才用。
 
-- 实现简单
-- 成本低
-- 没有拼接问题
-- 但中后段失控时无法局部修复
+### 基石 2：各段「并行」生成，不串行
 
-### Agent 分段模式
+- **做法**：用图像模型把每段的**首帧预生成**出来（秒级、可并行），然后各段视频**同时**调 Seedance，互不等待。
+- **为什么**：v1 串行是因为下段要等上段尾帧；一旦改用全局锁定，下段不再依赖上段产物 → 可并行 → 一条视频的出片时间约**减半**。
 
-```text
-Reference video + benchmark analysis + product images
-  -> Planner 输出 segment_plan
-  -> 每段单独生成
-  -> 每段检查 / 失败段重试
-  -> ffmpeg 拼接
-  -> 最终成片
-```
+### 基石 3：段间用「快切」，不追求无缝
 
-特点：
+- **做法**：接缝处做一个干脆的镜头切换（jump cut）。
+- **为什么**：两段分开生成，接缝处肤色 / 光线 / 朝向**一定有轻微跳变，消不掉**。TikTok 本就全是快切，观众习惯；追求无缝是假目标，拥抱快切反而更像真人剪的视频。
 
-- 每段负担更轻，稳定性更高
-- 可以按段做首帧接力
-- 可以局部重试
-- 但会新增跨段一致性、音频衔接、拼接自然度问题
+---
 
-结论：
+## 3. 总链路（并行版）
 
 ```text
-Agent 模式不是替代传统模式，而是作为实验性新模式并行存在。
-```
-
-## 3. Seedance 能力假设
-
-当前设计基于 Seedance / kie.ai 提供的以下能力：
-
-- `reference_image_urls`
-- `reference_video_urls`
-- `first_frame_url`
-- `last_frame_url`
-- `return_last_frame`
-
-设计含义：
-
-- 第一段可以继续使用“参考图 + 参考视频”的多模态参考模式，优先保证产品准确性与结构复刻
-- 后续段使用“上一段最后一帧 -> 下一段首帧”做人物 / 场景接力，同时继续传入商品参考图，避免产品细节在后续段漂移
-- 如果未来需要更强的镜头落点控制，可以引入 `last_frame_url` 做首尾帧约束
-
-注意：
-
-```text
-严格首尾帧模式和多模态参考模式通常不是完全等价的。
-第一版不要试图把所有参数一次性叠满，而是分角色使用。
-```
-
-## 4. 模式目标
-
-Agent 分段模式要解决的不是“所有问题”，而是优先解决以下问题：
-
-1. 长视频中后段的人物 / 产品漂移
-2. 单次失败导致整条作废
-3. 快切 hook 和主体段对模型要求差异太大
-4. 参考视频结构虽然分析出来了，但不能逐段执行
-
-第一阶段不追求：
-
-- 自动生成 5-8 段超复杂分镜
-- 每段都自动带自然音频
-- 高自由度场景切换
-- 完全自动化电影级转场
-
-第一阶段追求：
-
-- 两段式稳定跑通
-- 段与段能接上
-- 失败能局部重试
-- 产品准确性不低于当前单段模式
-
-## 5. 第一版推荐结构：两段式 Agent
-
-第一版建议固定为：
-
-```text
-Segment 1: hook，约 4-5 秒
-Segment 2: body + CTA，约 8-10 秒
-Final: 拼成 12-15 秒视频
-```
-
-理由：
-
-- Seedance 单段太短时收益不明显，反而拼接成本更高
-- 多于 2 段会显著提高跨段不一致概率
-- hook 与主体本来就是两个不同难度的问题，拆成两段最有业务意义
-
-默认切分逻辑：
-
-- 前 4-5 秒作为吸引注意力的 hook
-- 后 8-10 秒承载 demo / proof / CTA
-- Segment 1 结尾必须是稳定、居中、产品可见、容易接续的画面
-- Segment 2 开头第一秒必须严格延续 Segment 1 尾帧，不允许换人、换房间、换机位或换光线
-
-如果参考视频本身就是一镜到底、动作简单、结构单一，则 Planner 可以回退为：
-
-```text
-1 段，不启用 Agent 拆分
-```
-
-## 6. Agent 模式总链路
-
-```text
-用户提交（商品 + 参考视频 + generationMode=agentic_segments）
+用户提交（商品 + 参考视频 + generationMode=agentic_segments + 时长）
   ↓
-Phase A: 数据准备
-  ├─ 商品图准备
-  └─ TikTok 视频解析 / 下载
+Phase A 数据准备
+  ├─ 商品图准备（爬图 → S3）
+  └─ 参考视频解析 / 下载（量实际时长）
   ↓
-Phase B: Planner
-  ├─ 参考视频分析
-  ├─ Benchmark Analyzer（可选增强）
-  └─ 生成 segment_plan
+Phase B Planner
+  ├─ 消费 Gemini 分析（+ 可选 Benchmark Analyzer 结构化输出）
+  └─ 产出 segment_plan（含 global_locks + 每段精简 prompt）
   ↓
-Phase C: Segment 1 渲染
-  ├─ 多模态参考模式
-  ├─ return_last_frame = true
-  └─ 段级质检
+Phase C 预生成各段首帧（图像模型，秒级，并行）
+  └─ 参考图 = [模特定妆照, 产品图]，按各段构图出首帧
   ↓
-Phase D: Segment 2 渲染
-  ├─ 以上一段 last frame 作为 first_frame
-  ├─ 保持全局人物 / 场景 / 产品锁
-  └─ 段级质检
+Phase D 各段视频【并行】生成
+  └─ 每段：自己的首帧 + 全局锁 prompt + 参考音色锚点
   ↓
-Phase E: Stitch
-  ├─ ffmpeg 拼接
-  ├─ 统一导出
-  └─ 最终评分
+Phase E 段级质检（复用 gemini-video-judge）
+  ├─ hook 段：出 N 条挑最好 1 条
+  └─ 其他段：硬门禁不过 → 重试；反复失败 → 兜底
+  ↓
+Phase F 快切拼接（ffmpeg 统一分辨率/帧率/SAR）→ 上传 → 异步评分
 ```
 
-## 7. Planner 应该输出什么
+> 这套原则，分步工作流（WorkflowWizard）已先行落地大部分；老的 `agentic_segments` 串行支路应按此向并行演进，或与工作流融合。
 
-Planner 的职责不是写最终 prompt，而是产出一份可执行计划：
+---
+
+## 4. Planner 输出什么
+
+Planner 不写最终成片 prompt，只产出一份可执行计划：
 
 ```json
 {
-  "generation_mode": "agentic_segments_v1",
+  "generation_mode": "agentic_segments_v2",
   "total_duration": 14,
   "global_locks": {
-    "product_visual_anchor": "xxx",
+    "presenter_anchor": "统一模特定妆照的身份描述",
+    "product_visual_anchor": "产品视觉锚点",
     "dominant_color": "Warm Beige",
-    "presenter_profile": "xxx",
-    "scene_profile": "xxx",
-    "style_profile": "phone-held warm indoor UGC"
+    "scene_profile": "warm indoor bedroom",
+    "style_profile": "phone-held UGC, natural light"
   },
   "segments": [
     {
-      "index": 1,
-      "role": "hook",
-      "duration": 5,
-      "seedance_mode": "multimodal_reference",
-      "goal": "replicate benchmark opening pattern",
-      "product_visibility": "clear",
-      "action_policy": "low-risk",
-      "return_last_frame": true
+      "index": 1, "role": "hook", "duration": 4,
+      "focus": "单点：用一句话钩子+产品入镜",
+      "script_excerpt": "本段台词",
+      "segment_prompt": "只关于本段的精简 seedance prompt",
+      "candidates": 3
     },
     {
-      "index": 2,
-      "role": "body_cta",
-      "duration": 9,
-      "seedance_mode": "first_frame_continue",
-      "first_frame_source": "segment_1_last_frame",
-      "goal": "continue same person/product into demo and CTA",
-      "product_visibility": "clear",
-      "action_policy": "low-risk"
+      "index": 2, "role": "body_cta", "duration": 10,
+      "focus": "单点：演示卖点 + 收尾 CTA",
+      "script_excerpt": "本段台词",
+      "segment_prompt": "只关于本段的精简 seedance prompt",
+      "candidates": 1
     }
   ]
 }
 ```
 
-### Planner 必须明确的字段
-
-- `total_duration`
-- `global_locks`
-- `segments[].duration`
-- `segments[].role`
-- `segments[].seedance_mode`
-- `segments[].goal`
-- `segments[].action_policy`
-
-### global_locks 的作用
-
-这是整个 Agent 模式成功的关键。它是每段都必须重复注入的全局约束：
-
-- 同一产品视觉锚点
-- 同一主色
-- 同一人物描述
-- 同一场景描述
-- 同一风格描述
-
-换句话说：
+### 段数规则（统一口径）
 
 ```text
-Planner 负责决定“拆几段、每段做什么”
-global_locks 负责决定“拆开以后仍然看起来像同一条视频”
+1 段：参考视频一镜到底、动作简单 → 不拆，回退单段
+2 段：默认推荐（hook 与主体天然分离）
+3-4 段：仅当总时长足够、每段 ≥5s、且结构非常清晰时
+> 4 段：禁止（拼接点过多、收益递减）
 ```
 
-## 8. Segment 切分规则
+> ✅ **已对齐**：`agentic-planner.js` 的 `maxSegments` 已收敛到 **4**（`floor(totalDuration/5)` 且 ≤4），与本方案一致。
 
-### 优先切分点
+### hook 时长跟随参考
 
-- hook 结束点
-- 明确 jump cut
-- 叙事角色切换点：hook -> demo -> proof -> CTA
-- outfit 变化点
-- 产品露出从模糊到清晰的切换点
+不要写死 5 秒。读 Benchmark Analyzer / 参考视频的实际 hook 边界，clamp 到 **[3, 6]** 秒。参考视频 hook 只有 2-3 秒时，硬塞 5 秒会注水。
 
-### 禁止切分点
+### global_locks 是成败关键
 
-- 一句话中间
-- 一个动作进行到一半
-- 手正在接触产品的瞬间
-- 快速转身 / 穿脱 / 拉扯动作中间
-- 镜头运动最剧烈的瞬间
-
-### 推荐段数规则
+它是每段都要重复注入的全局约束：同一人物、同一产品锚点、同一主色、同一场景、同一风格。
 
 ```text
-1 段：结构很简单，一镜到底，动作风险低
-2 段：默认推荐，hook 和主体明显分离
-3 段：只有当每段都 >=4 秒、且结构非常清楚时才考虑
->3 段：第一版禁止
+Planner 决定「拆几段、每段做什么」
+global_locks 决定「拆开后仍像同一条视频」
 ```
 
-## 9. 每段的 Seedance 模式选择
+---
 
-### 模式 A：multimodal_reference
+## 5. 每段 prompt 策略
 
-输入：
+一段一个精简 prompt，每段两层信息：
 
-- `reference_image_urls`
-- `reference_video_urls`
+- **层 1 全局锁**：presenter / product anchor / color / scene / style（每段重复注入）
+- **层 2 本段目标**：role（hook/demo/cta）、本段时长、本段单一动作、本段台词、本段产品露出要求
 
-适用：
-
-- 第一段 hook
-- 产品准确性优先
-- 参考视频结构复刻优先
-
-优点：
-
-- 继承当前主流程能力
-- 最适合第一段建立产品与风格基准
-
-### 模式 B：first_frame_continue
-
-输入：
-
-- `first_frame_url`
-- 同一组 `reference_image_urls`
-- 可选弱参考视频
-
-适用：
-
-- 第二段延续同一人物 / 同一产品
-- 连续性优先
-
-优点：
-
-- 更容易保持跨段连贯
-- 后续段可以只重试当前段
-
-### 模式 C：first_last_frame
-
-输入：
-
-- `first_frame_url`
-- `last_frame_url`
-
-适用：
-
-- 需要强控制结尾落点时
-- 未来高级版本可用
-
-第一版建议：
-
-```text
-不作为默认路径，只保留接口兼容。
-```
-
-## 10. Prompt 生成策略
-
-Agent 模式不要复用“整条视频一个 prompt”的思路，而应改成：
-
-```text
-一段一个 prompt
-```
-
-但每段 prompt 都必须包含两层信息：
-
-### 层 1：全局固定锁
-
-- PRODUCT VISUAL ANCHOR
-- COLOR LOCK
-- CHARACTER CONSISTENCY
-- SCENE PROFILE
-- STYLE PROFILE
-
-### 层 2：该段独有目标
-
-- 该段 role：hook / demo / CTA
-- 该段时长
-- 该段动作
-- 该段对白
-- 该段产品露出要求
-- 该段风险替换规则
-
-段 prompt 的优先级应当是：
+段 prompt 优先级：
 
 ```text
 产品准确性 > 人物连续性 > 低风险动作 > 参考结构 > 创意变化
 ```
 
-## 11. last frame 接力机制
+关键纪律：每段**只聚焦一件事**，不要把多个卖点塞进一段；不要在段 prompt 里写整片时间线或别段内容（稀释模型注意力，这是分段的意义所在）。
 
-这是 Agent 模式和普通多段生成最大的区别。
+---
 
-### Segment 1
+## 6. 段级质检与重试（复用现成 judge）
 
-- 使用 `return_last_frame = true`
-- 如果上游接口直接返回最后一帧 URL，优先使用
-- 如果接口不直接返回，使用 ffmpeg 从生成视频末尾抽帧并上传 S3
+**不要另起炉灶**——直接复用 `gemini-video-judge.js` 的相关维度给每段打分，按损失分三层处理：
 
-### Segment 2
+| 层级 | 判据（judge 维度） | 不过时动作 |
+|---|---|---|
+| 🔴 硬门禁（废片） | `no_text_leakage`（字幕泄漏）、`product_accuracy`（串色/串货）、`audio_quality`（风声） | **必重做 / 不交付** |
+| 🟡 商业门禁 | `hook_strength`（前3秒抓注意力，**需新增维度**）、防查重 | hook 段：**出 N 条挑最好**；不过则重做 |
+| ⚪ 软指标 | `natural_ugc_feel`、`anatomical_correctness`（手指，**已降级**） | 只记录；手指仅产品特写时人工扫一眼 |
 
-- 将上一段的最后一帧作为 `first_frame_url`
-- 使用相同 `global_locks`
-- 尽量避免段首就是复杂动作
+### hook 段「出 N 条挑一条」
 
-原则：
+hook 最重要、最该多生成。Planner 给 hook 段 `candidates: 3`，并行出 3 条，用 `hook_strength` + `product_accuracy` 选最好的 1 条；其他段默认 `candidates: 1`。这是性价比最高的一处投入。
 
-```text
-段与段之间不是“独立短视频拼起来”
-而是“上一段最后一帧驱动下一段继续往下演”
-```
-
-## 12. 段级检查与重试
-
-Agent 模式真正的收益之一，是允许只重试失败段。
-
-每段生成后先做段级检查：
-
-- 人物是否连续
-- 产品颜色是否正确
-- 产品结构是否明显跑偏
-- 该段关键露出是否清楚
-- 是否出现复杂手部崩坏
-
-### 重试策略
-
-第一版建议每段最多重试 1 次：
+### 重试与兜底（别"整条报废"）
 
 ```text
-第 1 次失败：
-  优先改动作，不改产品锚点
-  优先减少手部 / 转身 / 拉扯
-
-第 2 次还失败：
-  判定该段失败，整条任务失败
+某段失败：重试 1 次（优先改动作、减手部/转身/拉扯，不动产品锚点）
+重试仍失败：不要判整条任务死 →
+  - 该段降级用更保守的静态构图重出，或
+  - 整条 fallback 回 single_pass 出一条保底
 ```
 
-这样可以避免 Agent 模式把成本无限拉高。
+目标：分段是为了更稳，不能因为多了拼接环节反而更脆。**永远有一条逃生通道。**
 
-## 13. 音频策略
+---
 
-第一版建议：
+## 7. 音频策略：参考音色锚点
+
+v1 建议「先静音、后期统一配音」。实践已有更好解法，v2 采用：
+
+- 各段 `generate_audio = true`，并传入**同一段参考音频**作为音色锚点（`reference_audio_urls`），让各段口播的音色 / 性别 / 年龄 / 口音一致。
+- prompt 里加 `[VOICE ANCHOR]` 指令强化「全程同一个人声」。
+
+这样省掉「先静音再配音」的二次工序，且跨段音色统一。（断句 / 语气在快切点的自然度仍需观察，必要时再回退统一 TTS。）
+
+---
+
+## 8. 拼接：拥抱快切
+
+- **删除「无缝」目标。** 接缝处用干脆的 jump cut。
+- ffmpeg 拼接前统一各段：分辨率（按 9:16 预设）、`fps=30`、`setsar=1`、`format=yuv420p`，避免参数不一致导致拼接报错或跳帧。
+- 带音轨拼接时各段音频 `aresample` 对齐采样率 / 声道再 concat。
+
+（以上 `agentic-stitcher.js` 已实现，保持即可。）
+
+---
+
+## 9. 数据落库
+
+为做 A/B 和失败回溯，建议记录到段级：
 
 ```text
-generate_audio = false
+jobs 级：generation_mode / segment_plan_json / segment_count / stitched_video_url
+段 级：segment_index / role / seedance_mode / duration / prompt /
+       video_url / judge_scores / status / retry_count / candidate_count
 ```
 
-理由：
+第一版可先复用 job 的 `full_data` JSON blob 存（工作流已这么做，免改表）；当要正经做「哪段最容易失败 / hook 难还是 demo 难」的统计分析时，再升级为结构化 `video_segments` 表。
 
-- 每段单独生成音频后再拼接，最容易出现断句、语气跳变、房间音不一致
-- 第一版更应该先验证画面结构、产品准确性、人物连续性
+---
 
-因此：
+## 10. 成功标准（技术 + 商业）
 
-- Agent v1 先做静音视觉段拼接
-- 统一 voiceover / TTS 放到后续阶段
+v1 的标准全是技术指标，缺商业 KPI。v2 两者都要：
 
-## 14. 后端模块拆分建议
-
-建议新增三个服务，而不是把所有逻辑堆进 `generate.js`：
-
-### `backend/services/agentic-planner.js`
-
-职责：
-
-- 消费参考视频分析结果
-- 可选消费 Benchmark Analyzer 输出
-- 产出 `segment_plan`
-
-### `backend/services/segment-renderer.js`
-
-职责：
-
-- 按 segment_plan 逐段调用 Seedance
-- 处理 `first_frame_url / last_frame_url / return_last_frame`
-- 处理段级重试
-
-### `backend/services/video-stitcher.js`
-
-职责：
-
-- 抽最后一帧
-- 拼接片段
-- 导出最终视频
-- 上传 S3
-
-### `backend/routes/generate.js`
-
-职责：
-
-- 只做模式分流
+**技术门槛**
 
 ```text
-single_pass -> 现有传统模式
-agentic_segments -> Agent 新模式
+成片成功率 ≥ 单段模式
+product_accuracy 不低于单段模式
+人物跨段一致（同一张脸）
+≥ 50% 的失败任务能定位到具体 segment
 ```
 
-## 15. 前端产品形态建议
-
-第一版建议在生成页新增一个明确开关：
+**商业门槛（真正决定生意）**
 
 ```text
-生成模式：
-- 传统单段
-- Agent 分段实验
+hook 前 3 秒「抓注意力」得分（hook_strength）明显高于单段
+  └─ 发布后回填真实「3 秒完播率」校准这个门槛（见 PROJECT_STATUS.md 商业 KPI 门禁）
+同一标杆能裂变 5+ 条、防查重得分达标
 ```
 
-Agent 模式下可展示：
+不算成功的情况：产品准确性下降、段间人物差异大、成本涨太多但收益不明显。
 
-- 计划总时长
-- 计划段数
-- 每段 role
-- 每段时长
-- 当前渲染到第几段
-- 每段 taskId
-- 拼接结果
+---
 
-不要一开始就暴露太多复杂配置，先让用户感知：
+## 11. 一句话原则
 
 ```text
-这是“实验模式”，系统会分两段生成并拼接。
+把一条长视频拆成几个更容易生成、更容易检查、更容易重试的片段，
+用「全局资产锁定」保证它们像同一个人同一件货，
+各段并行出、快切拼接，再用现成 judge 把关、hook 多挑一条。
 ```
 
-## 16. 数据落库建议
-
-为了做 A/B 和回溯，建议新增两层记录：
-
-### jobs 级别
-
-- `generation_mode`: `single_pass | agentic_segments_v1`
-- `segment_plan_json`
-- `segment_count`
-- `stitched_video_url`
-
-### segment 级别
-
-建议新增 `video_segments` 表：
-
-```sql
-video_segments (
-  segment_id TEXT PRIMARY KEY,
-  job_id TEXT NOT NULL,
-  segment_index INTEGER NOT NULL,
-  role TEXT,
-  seedance_mode TEXT,
-  duration_seconds INTEGER,
-  prompt TEXT,
-  first_frame_url TEXT,
-  last_frame_url TEXT,
-  video_url TEXT,
-  status TEXT,
-  retry_count INTEGER DEFAULT 0,
-  created_at BIGINT NOT NULL
-)
-```
-
-这样后续可以明确回答：
-
-- 哪一段最容易失败
-- 是 hook 难，还是 demo 难
-- first-frame 接力到底有没有帮助
-
-## 17. 三个实施路标
-
-建议只规划 3 个路标，避免把 Agent 模式拆成过多阶段后失焦。每个路标都必须能独立交付一个可验证结果。
-
-### 路标 1：两段式最小闭环
-
-- 明确 `generationMode` 新枚举
-- 扩展 `kieai.js` 支持首帧 / 尾帧 / 返回尾帧参数
-- 定义 `segment_plan` JSON schema
-- Planner 固定输出 2 段
-- Segment 1 用 `multimodal_reference`
-- Segment 2 用 `first_frame_continue`
-- ffmpeg 拼接输出最终视频
-- 前端展示 Agent 任务状态
-
-目标：
-
-```text
-先跑通 Agent 分段生成，不追求最优。
-```
-
-验收：
-
-- 可以从前端选择 `agentic_segments`
-- 可以生成第 1 段和第 2 段
-- 第 2 段可以使用第 1 段尾帧接力
-- 最终可以拼接并返回 1 条完整视频
-
-### 路标 2：段级质量闭环
-
-- 对每段做基础质量检查
-- 失败段允许重试 1 次
-- 历史页可查看每段视频和最终拼接视频
-- 记录每段的 `role / duration / prompt / status / retry_count`
-- 建立“失败定位到 segment”的排查能力
-
-目标：
-
-```text
-让 Agent 模式不只是能生成，还能知道哪一段失败、为什么失败、是否值得重试。
-```
-
-验收：
-
-- 任意一段失败时，不需要整条从头排查
-- 至少能区分 hook 失败、body_cta 失败、拼接失败
-- 前端能看到段级任务状态和最终成片状态
-
-### 路标 3：Benchmark 驱动的智能 Planner
-
-- 用 `shot_list / replicable_template / risks` 增强 Planner
-- 自动判断切分点和动作风险
-- 根据参考视频结构动态决定 1 段 / 2 段 / 少量 3 段
-- 首尾帧能力用于更强的镜头落点控制
-- 拼接后统一加 voiceover / TTS，控制整条音频连续性
-
-目标：
-
-```text
-从固定两段式，升级为真正由标杆分析结果驱动的 Agent 决策。
-```
-
-验收：
-
-- Planner 明确引用 Benchmark Analyzer 的结构化输出
-- 简单参考视频可以回退单段
-- 标准 UGC 可以稳定两段
-- 只有结构非常清晰且每段时长足够时才允许三段
-- 音频策略不会破坏最终成片连贯性
-
-## 18. 成功标准
-
-Agent 模式不是看“更高级”，而是看业务指标是否更稳。
-
-建议第一阶段成功门槛：
-
-```text
-Agent 模式成片成功率 >= 传统模式
-Agent 模式 product_accuracy 不低于传统模式
-Agent 模式 reference_structure_match 平均提升 >= 0.5 分
-Agent 模式 hook 清晰度明显提升
-至少 50% 的失败任务可以定位到具体 segment，而不是整条原因不明
-```
-
-如果出现以下情况，则不算成功：
-
-- 产品准确性显著下降
-- 段与段人物差异很大
-- 拼接感过重
-- 成本提升太多但收益不明显
-
-## 19. 一句话原则
-
-Agent 模式的本质不是“多次调模型”，而是：
-
-```text
-把一条长视频拆成几个更容易生成、更容易检查、更容易重试的可执行片段，
-再通过全局锁和首帧接力把它们重新组织成一条完整视频。
-```
-
-如果未来这条路跑通，Benchmark Analyzer 就不再只是“生成前的分析报告”，而会成为：
-
-```text
-整个 Agent 视频系统的大脑。
-```
+如果这条路跑通，Benchmark Analyzer 就不只是「生成前的分析报告」，而会成为驱动 Planner 决策的大脑。

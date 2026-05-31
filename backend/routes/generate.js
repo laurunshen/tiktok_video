@@ -10,14 +10,12 @@ import { analyzeAndGeneratePrompt, SEEDANCE_MANDATORY_BLOCKS, VARIANT_RECIPES } 
 import { validateGeminiOutput, formatValidationReport } from '../services/prompt-validator.js'
 import { reviewPrompt, reviseGeminiOutput, formatReviewReport, clearImageCache } from '../services/gemini-review.js'
 import { saveJob, getJob, listJobs, countJobs, countJobsByProduct, saveVideo, updateVideoJudge, updateVideoDiffJudge, updateVideoUrl, getVideosByJob, markVideoPublished } from '../services/db.js'
-import { S3_ENABLED, uploadUrlToS3, uploadVideoAndPosterFromUrl, generatePosterForExistingVideo } from '../services/s3-upload.js'
 import { judgeGeneratedVideo, judgeNarrativeDifferentiation } from '../services/gemini-video-judge.js'
 import { uploadMediaFiles, uploadMediaFile } from '../services/media-upload.js'
-import { createBatchTasks, createVideoTask, getTaskStatus, parseTaskResult } from '../services/kieai.js'
+import { createBatchTasks } from '../services/kieai.js'
 import { getTikTokPlaybackUrl } from '../services/snaptik.js'
-import { buildAgenticSegmentPlan, buildAgenticSegmentPlanLLM, summarizeSegmentPlan } from '../services/agentic-planner.js'
-import { buildAgenticSegmentPrompt } from '../services/agentic-prompt-builder.js'
-import { extractLastFrame, stitchSegments } from '../services/agentic-stitcher.js'
+import { pollRecoverableSeedanceJob } from '../services/job-recovery.js'
+import { runAgenticGeneration } from '../services/agentic-runner.js'
 
 // 用 ffprobe 探测视频实际时长（秒，浮点数）
 function ffprobeDuration(filePath) {
@@ -155,19 +153,6 @@ async function cleanupFiles(files) {
   }
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
-async function downloadFileToPath(sourceUrl, outPath) {
-  const response = await axios.get(sourceUrl, {
-    responseType: 'arraybuffer',
-    timeout: 120000,
-    headers: { 'User-Agent': 'Mozilla/5.0' },
-  })
-  await writeFile(outPath, response.data)
-}
-
 async function persistVideosForJob(jobId, job, videos) {
   for (const video of videos) {
     try {
@@ -229,193 +214,6 @@ function queueVideoJudges(jobId, job, videos) {
       }
     }
   })
-}
-
-async function waitForTaskCompletion({ jobId, taskId, onUpdate, pollMs = 15000, maxAttempts = 80 }) {
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      const raw = await getTaskStatus(taskId)
-      const parsed = parseTaskResult(raw)
-      if (onUpdate) await onUpdate(parsed)
-      if (parsed.state === 'success' || parsed.state === 'fail') return parsed
-    } catch (e) {
-      console.warn(`[${jobId}] Agent 轮询异常（继续重试）${taskId}: ${e.message}`)
-    }
-    await sleep(pollMs)
-  }
-  throw new Error(`任务 ${taskId} 轮询超时`)
-}
-
-async function runAgenticGeneration({
-  job,
-  jobId,
-  geminiResult,
-  finalPrompt,
-  referenceImageUrls,
-  referenceVideoUrls,
-  referenceAudioUrl = '',
-  resolution,
-  duration,
-  allFiles,
-  setStep,
-}) {
-  // LLM 智能分镜（失败时内部 fallback 到规则版 2 段）
-  const plan = await buildAgenticSegmentPlanLLM({
-    targetDuration: duration,
-    geminiResult,
-  })
-
-  job.agentPlan = plan
-  job.agentPlanSummary = summarizeSegmentPlan(plan)
-  console.log(`[${jobId}] Agent 分镜计划:`, JSON.stringify(job.agentPlanSummary))
-  job.tasks = []
-  job.taskStatuses = plan.segments.map(segment => ({
-    taskId: null,
-    state: 'waiting',
-    progress: 0,
-    failMsg: '',
-    segmentIndex: segment.index,
-    role: segment.role,
-  }))
-  await saveJob(job)
-
-  const segmentArtifacts = []
-  let firstFrameUrl = ''
-
-  for (const segment of plan.segments) {
-    const taskIndex = segment.index - 1
-    setStep(3, `Agent 生成第 ${segment.index}/${plan.segments.length} 段（${segment.role}）`)
-
-    let segmentPrompt = buildAgenticSegmentPrompt({
-      basePrompt: finalPrompt,
-      segment,
-      plan,
-    })
-    // 参考音频做音色锚点：各段共用同一段音频，口播音色保持一致
-    if (referenceAudioUrl) {
-      segmentPrompt += '\n\n[VOICE ANCHOR]\nThe presenter speaks with the EXACT voice timbre, gender, age, and accent of the provided reference audio. Keep this same voice identity across every segment of the video; never switch to a different-sounding speaker.'
-    }
-
-    const task = await createVideoTask({
-      prompt: segmentPrompt,
-      referenceImageUrls,
-      referenceVideoUrls: segment.seedanceMode === 'multimodal_reference' ? referenceVideoUrls : [],
-      referenceAudioUrls: referenceAudioUrl ? [referenceAudioUrl] : [],
-      firstFrameUrl: segment.seedanceMode === 'first_frame_continue' ? firstFrameUrl : '',
-      resolution,
-      duration: segment.duration,
-      aspectRatio: '9:16',
-      returnLastFrame: !!segment.returnLastFrame,
-      generateAudio: true,
-    })
-
-    job.taskStatuses[taskIndex] = {
-      ...job.taskStatuses[taskIndex],
-      taskId: task.taskId,
-      state: 'queuing',
-      progress: 0,
-      failMsg: '',
-    }
-    job.tasks[taskIndex] = {
-      taskId: task.taskId,
-      segmentIndex: segment.index,
-      role: segment.role,
-      seedanceMode: segment.seedanceMode,
-      prompt: segmentPrompt,
-      duration: segment.duration,
-    }
-    await saveJob(job)
-
-    const parsed = await waitForTaskCompletion({
-      jobId,
-      taskId: task.taskId,
-      onUpdate: async (status) => {
-        job.taskStatuses[taskIndex] = {
-          ...job.taskStatuses[taskIndex],
-          taskId: task.taskId,
-          state: status.state,
-          progress: status.progress ?? null,
-          failMsg: status.failMsg || '',
-        }
-        await saveJob(job)
-      },
-    })
-
-    if (parsed.state !== 'success' || !parsed.videoUrl) {
-      throw new Error(parsed.failMsg || `第 ${segment.index} 段生成失败`)
-    }
-
-    const segmentVideoPath = path.join(os.tmpdir(), `${uuidv4()}-agent-segment-${segment.index}.mp4`)
-    await downloadFileToPath(parsed.videoUrl, segmentVideoPath)
-    allFiles.push({ path: segmentVideoPath })
-
-    let handoffFrameUrl = ''
-    if (segment.returnLastFrame) {
-      handoffFrameUrl = parsed.lastFrameUrl || ''
-      if (!handoffFrameUrl) {
-        const framePath = path.join(os.tmpdir(), `${uuidv4()}-agent-segment-${segment.index}-last.jpg`)
-        await extractLastFrame(segmentVideoPath, framePath)
-        allFiles.push({ path: framePath })
-        handoffFrameUrl = await uploadMediaFile(framePath, `agent-segment-${segment.index}-last.jpg`)
-      }
-      firstFrameUrl = handoffFrameUrl
-    }
-
-    segmentArtifacts.push({
-      index: segment.index,
-      role: segment.role,
-      taskId: task.taskId,
-      prompt: segmentPrompt,
-      rawVideoUrl: parsed.videoUrl,
-      localVideoPath: segmentVideoPath,
-      handoffFrameUrl,
-    })
-
-    job.taskStatuses[taskIndex] = {
-      ...job.taskStatuses[taskIndex],
-      taskId: task.taskId,
-      state: 'success',
-      progress: 100,
-      failMsg: '',
-    }
-    job.agentSegments = segmentArtifacts.map(artifact => ({
-      index: artifact.index,
-      role: artifact.role,
-      taskId: artifact.taskId,
-      videoUrl: artifact.rawVideoUrl,
-      handoffFrameUrl: artifact.handoffFrameUrl,
-    }))
-    await saveJob(job)
-  }
-
-  let finalVideoPath = segmentArtifacts[0].localVideoPath
-  if (segmentArtifacts.length > 1) {
-    setStep(3, '拼接 Agent 分段视频')
-    finalVideoPath = path.join(os.tmpdir(), `${uuidv4()}-agent-final.mp4`)
-    await stitchSegments(segmentArtifacts.map(segment => segment.localVideoPath), finalVideoPath, { resolution, withAudio: true })
-    allFiles.push({ path: finalVideoPath })
-  }
-
-  const finalVideoUrl = await uploadMediaFile(finalVideoPath, `${jobId}-agent-final.mp4`)
-  let posterUrl = null
-  if (S3_ENABLED) {
-    try {
-      posterUrl = await generatePosterForExistingVideo(finalVideoUrl, `${jobId}-agent-final`)
-    } catch (e) {
-      console.warn(`[${jobId}] Agent 最终视频 poster 生成失败（跳过）: ${e.message}`)
-    }
-  }
-
-  return {
-    plan,
-    segmentArtifacts,
-    finalVideo: {
-      taskId: `${jobId}-agent-final`,
-      videoUrl: finalVideoUrl,
-      posterUrl,
-      prompt: finalPrompt,
-    },
-  }
 }
 
 // POST /api/generate
@@ -667,6 +465,7 @@ router.post('/', upload.fields([
             productVisualFeatures: geminiResult.product_visual_features,
             productImageUrls: finalReferenceImageUrls,
             targetDuration: duration,
+            productInfo,
           })
         } catch (e) {
           console.warn(`[${jobId}] 评估调用异常（跳过评估，使用当前 prompt）: ${e.message}`)
@@ -675,6 +474,12 @@ router.post('/', upload.fields([
         console.log(`[${jobId}] [评估第 ${revisionRound + 1} 轮] ${formatReviewReport(review)}`)
         lastReview = review
         job.reviewReport = review
+
+        // === 评估跳过 → 使用当前 prompt 继续，但不要误报为"通过" ===
+        if (review.skipped) {
+          console.warn(`[${jobId}] ⚠️ 二次评估跳过：${review.suggestion || '未完成评估'}`)
+          break
+        }
 
         // === 通过 → 退出循环 ===
         if (review.pass) {
@@ -895,91 +700,10 @@ router.get('/status/:jobId', async (req, res) => {
     return res.status(404).json({ error: 'Job not found' })
   }
 
-  // Poll live status from kie.ai for each pending task
+  // Poll live status from kie.ai for each recoverable pending single_pass task.
+  // 复用恢复器，保证前端轮询和后台启动恢复的行为一致。
   if (job.tasks && job.status === 'pending') {
-    const taskStatuses = await Promise.all(
-      job.tasks.map(async (task) => {
-        const taskId = task.taskId
-        if (!taskId) return { taskId: null, state: 'unknown' }
-        try {
-          const raw = await getTaskStatus(taskId)
-          const parsed = parseTaskResult(raw)
-
-          // 详细轮询日志
-          const progressStr = parsed.progress != null ? ` | 进度 ${parsed.progress}%` : ''
-          if (parsed.state === 'fail') {
-            console.error(`[${jobId}] ❌ 任务失败 ${taskId} | 原因: ${parsed.failMsg}`)
-          } else {
-            console.log(`[${jobId}] 🔄 轮询 ${taskId} | 状态: ${parsed.state}${progressStr}`)
-          }
-
-          return { taskId, ...parsed }
-        } catch (e) {
-          // 网络抖动不算任务失败，保持 waiting 状态继续下次轮询
-          console.warn(`[${jobId}] ⚠️ 轮询网络异常（跳过）${taskId} | ${e.message}`)
-          return { taskId, state: 'waiting', failMsg: '' }
-        }
-      })
-    )
-
-    const successTasks = taskStatuses.filter(t => t.state === 'success' && t.videoUrl)
-
-    // S3 自动持久化：把 kie tempfile URL 上传到我们自己的 S3，替换 videoUrl
-    // 同时生成首帧 poster JPG（历史页缩略图用，省 100× 流量）
-    // 失败不阻塞，会保留原 kie URL；poster 失败 posterUrl=null（前端 fallback 到 video tag）
-    if (S3_ENABLED) {
-      for (const t of successTasks) {
-        if (t.videoUrl && !t.videoUrl.includes('hypit.s3.')) {
-          try {
-            const { videoUrl, posterUrl } = await uploadVideoAndPosterFromUrl(t.videoUrl, t.taskId)
-            console.log(`[${jobId}] ☁️ S3 上传成功 ${t.taskId}: ${videoUrl}${posterUrl ? ' + poster' : ''}`)
-            t.videoUrl = videoUrl
-            t.posterUrl = posterUrl
-          } catch (e) {
-            console.warn(`[${jobId}] ☁️ S3 上传失败（保留 kie URL）${t.taskId}: ${e.message}`)
-          }
-        }
-      }
-    }
-
-    const videos = successTasks.map(t => ({ taskId: t.taskId, videoUrl: t.videoUrl, posterUrl: t.posterUrl ?? null }))
-
-    job.videos = videos
-
-    // 关键：先更新到 job 上再 saveJob，否则持久化的 taskStatuses 是上次轮询的旧值
-    // —— 历史上所有失败 job 的 failMsg 都是因此被丢的（taskStatuses 只剩创建快照的 waiting）
-    job.taskStatuses = taskStatuses
-
-    const allDone = taskStatuses.every(t =>
-      t.state === 'success' || t.state === 'fail'
-    )
-    if (allDone) {
-      job.status = videos.length > 0 ? 'completed' : 'failed'
-      job.completedAt = Date.now()
-      if (job.startedAt) job.totalMs = job.completedAt - job.startedAt
-      // 失败时把每个 task 的 failMsg 拼成 error_message，便于历史页一眼看到原因
-      if (videos.length === 0) {
-        const failMsgs = taskStatuses
-          .filter(t => t.state === 'fail' && t.failMsg)
-          .map((t, i) => `[task ${t.taskId?.slice(-8) || i}] ${t.failMsg}`)
-        if (failMsgs.length > 0) {
-          job.error = `Seedance 任务失败：${failMsgs.join(' | ')}`
-        } else if (!job.error) {
-          job.error = 'Seedance 所有任务未产出视频（无 failMsg，可能上游超时被静默吞）'
-        }
-      }
-      if (videos.length > 0) {
-        console.log(`[${jobId}] ✅ 所有任务完成，视频数: ${videos.length}`)
-        videos.forEach(v => console.log(`[${jobId}]    🎬 ${v.videoUrl}`))
-        await persistVideosForJob(job.jobId, job, videos)
-        queueVideoJudges(jobId, job, videos)
-      } else {
-        console.error(`[${jobId}] ❌ 所有任务均失败`)
-      }
-      saveJob(job).catch(e => console.warn('[DB] saveJob error:', e.message))  // 完成时持久化最终状态
-    }
-
-    job.taskStatuses = taskStatuses
+    job = await pollRecoverableSeedanceJob(job, { source: 'status' })
   }
 
   res.json({

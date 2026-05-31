@@ -21,6 +21,25 @@ const genai = new GoogleGenAI({
 
 const MAX_IMG_BYTES = 1 * 1024 * 1024
 
+// 把商品的结构化文字信息拼成一段"权威产品规格"，喂给审稿官当地面真相。
+// 重点：产品标题往往直接写明结构（如 "No Underwire / Unlined / Seamless"），
+// 这比模型凭低画质图"看出钢圈"可靠得多。
+function formatProductSpec(productInfo) {
+  if (!productInfo || typeof productInfo !== 'object') return ''
+  const bits = []
+  if (productInfo.name) bits.push(`Title: ${productInfo.name}`)
+  if (productInfo.shopName) bits.push(`Brand/Shop: ${productInfo.shopName}`)
+  if (productInfo.materials) bits.push(`Materials: ${productInfo.materials}`)
+  if (productInfo.style) bits.push(`Style: ${productInfo.style}`)
+  if (productInfo.design) bits.push(`Design: ${productInfo.design}`)
+  if (Array.isArray(productInfo.otherProperties)) {
+    for (const p of productInfo.otherProperties) {
+      if (p?.name && p?.value) bits.push(`${p.name}: ${p.value}`)
+    }
+  }
+  return bits.join('\n')
+}
+
 // In-memory 缓存：URL → inlineData base64 part
 // 避免 review 和 revise（最多 4 次调用）重复下载 + sharp 压缩同一批产品图
 // 简单 LRU：超过 100 条删最旧的，避免长期内存泄漏
@@ -86,8 +105,10 @@ export async function reviewPrompt({
   productVisualFeatures,
   productImageUrls = [],
   targetDuration,
+  productInfo = null,
 }) {
   const parts = []
+  const productSpec = formatProductSpec(productInfo)
 
   parts.push({
     text: `You are a senior creative director reviewing a draft video generation prompt written by a junior copywriter. Your job is to catch problems BEFORE the prompt is sent to an expensive video generation model. Be ruthless — every issue caught saves significant compute cost.
@@ -107,7 +128,13 @@ Below are the PRODUCT IMAGES the video should accurately depict. Look at them ca
   }
 
   parts.push({
-    text: `\n\n=== DRAFT PROMPT TO REVIEW ===
+    text: `\n\n${productSpec ? `=== AUTHORITATIVE PRODUCT SPEC (from the merchant's own listing — HIGHEST PRIORITY GROUND TRUTH) ===
+${productSpec}
+=== END PRODUCT SPEC ===
+
+CRITICAL: The PRODUCT SPEC above (especially the listing Title) is the authoritative source for the product's STRUCTURE. If it states "No Underwire", "Wireless", "Unlined", "Seamless", "Soft cup", etc., then that IS the product — you must NOT contradict it based on what you think you see in compressed images. Soft-cup seams, molded-cup curvature, a band casing seam, or a back hook-and-eye closure are NOT evidence of an underwire. Do NOT flag an "underwire vs wireless" (or padded vs unlined) structure mismatch as critical when it conflicts with the spec — at most note it as a warning.
+
+` : ''}=== DRAFT PROMPT TO REVIEW ===
 ${prompt}
 === END DRAFT PROMPT ===
 
@@ -129,8 +156,8 @@ CLASS A — PRODUCT INACCURACY (will produce a video that misrepresents the prod
    - Compare the product images against the [PRODUCT VISUAL ANCHOR] block.
    - Flag CRITICAL only if the prompt describes the product DIFFERENTLY from what the images clearly show. Examples:
      ❌ Anchor says "laser-cut seamless edges" but images clearly show stitched hems
-     ❌ Anchor says "wireless" but images clearly show underwire
      ❌ Anchor says "padded" but images clearly show unlined
+     ⚠️ STRUCTURE (underwire↔wireless, padded↔unlined): defer to the AUTHORITATIVE PRODUCT SPEC / listing Title. NEVER flip "wireless"→"underwire" (or "unlined"→"padded") from image guesses alone, and NEVER flag such a structure mismatch as critical when the spec says otherwise. A curved band seam / molded cup / back hook closure is NOT an underwire.
      ❌ Brand name in script does not match brand name visible on product packaging in images
      ❌ Self-contradicting descriptions in the same anchor (e.g. "deep V plunge" AND "balconette" — these are different garments)
      ❌ construction ↔ edge_finish contradiction: "smooth seamless" + any stitched edge_finish (folded hem / picot / bound edge / topstitching) is physically impossible — seamless garments can't have stitched edges. When flagging, the revision instruction MUST tell Gemini: "trust edge_finish, change construction to 'visible seams' or 'lace panels'". Similarly: "lace panels" or "mesh inserts" + "laser-cut flat edges" is impossible (lace/mesh have stitched perimeters).
@@ -184,8 +211,20 @@ PASS RULE:
   } catch (e) {
     console.error('[review] JSON parse failed:', e.message)
     console.error('[review] Raw:', text.slice(0, 500))
-    // 解析失败按通过处理，避免阻塞主流程
-    return { pass: true, score: 5, issues: [], suggestion: '审查响应解析失败，跳过此次评估' }
+    // 解析失败不阻塞主流程，但必须标记为 skipped，避免日志误报为"通过"
+    return {
+      pass: true,
+      skipped: true,
+      parseFailed: true,
+      score: null,
+      issues: [{
+        severity: 'warning',
+        field: 'Gemini Review',
+        problem: '审查响应为空或不是有效 JSON，已跳过此次评估',
+        fix: '可重新生成或查看 Gemini 原始响应',
+      }],
+      suggestion: '审查响应解析失败，跳过此次评估',
+    }
   }
 }
 
@@ -288,6 +327,15 @@ export function clearImageCache(urls) {
 }
 
 export function formatReviewReport(review) {
+  if (review.skipped) {
+    const lines = [`⚠️ Gemini 二次评估跳过（${review.parseFailed ? '响应解析失败' : '未完成'}）`]
+    for (const i of review.issues || []) {
+      lines.push(`  ⚠️ [${i.field}] ${i.problem}`)
+      if (i.fix) lines.push(`     → 建议: ${i.fix}`)
+    }
+    return lines.join('\n')
+  }
+
   const lines = [
     review.pass
       ? `✅ Gemini 二次评估通过（评分 ${review.score}/10）`

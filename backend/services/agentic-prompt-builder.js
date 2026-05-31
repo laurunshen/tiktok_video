@@ -25,13 +25,25 @@ function buildSlimSegmentPrompt({ segment, plan }) {
     lockSummary ? `Global locks that must stay identical across every segment: ${lockSummary}.` : '',
   ]
 
-  if (segment.seedanceMode === 'first_frame_continue') {
+  if (segment.seedanceMode === 'keyframe_reference') {
+    lines.push(
+      'The provided first frame is the visual anchor for this segment. Start from it naturally: preserve the same presenter identity, product, room, lighting, camera distance, and handheld phone-video style.',
+      'This segment will be stitched with other independently generated segments using a natural TikTok jump cut. Do not try to create a seamless transition; focus on making this one segment stable, clear, and product-accurate.',
+    )
+  } else if (segment.seedanceMode === 'first_frame_continue') {
     lines.push(
       'The provided first frame is a hard continuity anchor. Begin as if the camera never cut: same presenter, same pose direction, same room, same camera distance, same lighting, same product placement. No new establishing shot, no different person, no outfit reset, no sudden zoom or angle jump at the start.',
+      'Product continuity is mandatory: the garment already visible in the first frame is the only product to continue. Preserve its exact color, silhouette, cup shape, band/edge finish, fabric texture, strap placement, and fit from the first frame and the global locks. Do not redesign, simplify, recolor, or swap it.',
     )
   }
 
   lines.push('', '[THIS SEGMENT — EXECUTE ONLY THIS]', segment.segmentPrompt)
+
+  if (segment.returnLastFrame) {
+    lines.push(
+      'End this segment on a clean stable handoff frame: presenter face, hair, upper body, product, room, and lighting are all clearly visible and not motion-blurred. The final frame must be easy for the next segment to continue from.',
+    )
+  }
 
   const header = lines.filter(Boolean).join('\n')
   return `${header}\n\n[MANDATORY GLOBAL RULES — ALWAYS APPLY]\n${SEEDANCE_MANDATORY_BLOCKS}`

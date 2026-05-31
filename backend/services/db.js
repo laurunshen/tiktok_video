@@ -248,7 +248,23 @@ export async function initDb() {
     await addCol('reference_videos', 'affiliate_refund_count', 'INTEGER')
     await addCol('reference_videos', 'affiliate_refund_gmv', 'DOUBLE PRECISION')
 
-    // --- 清理僵尸 job（重启时 processing 状态 = 进程被杀，无人接管） ---
+    // --- 恢复/清理重启前的 job ---
+    // single_pass 在 Seedance taskId 创建后可以靠轮询接管；不要在启动时误杀。
+    const resumable = await client.query(`
+      UPDATE jobs SET
+        status = 'pending',
+        step = 3,
+        step_label = 'Seedance 生成中（后端重启后恢复轮询）'
+      WHERE status = 'processing'
+        AND COALESCE(full_data::jsonb->>'generationMode', 'single_pass') <> 'agentic_segments'
+        AND jsonb_typeof(full_data::jsonb->'tasks') = 'array'
+        AND jsonb_array_length(full_data::jsonb->'tasks') > 0
+    `)
+    if (resumable.rowCount > 0) {
+      console.log(`[DB] 恢复 ${resumable.rowCount} 条已创建 Seedance task 的 job（processing → pending）`)
+    }
+
+    // 其余 processing 多半卡在 Gemini/上传/ffmpeg 等进程内阶段，HTTP 调用已随进程消失，无法原地恢复。
     const zombie = await client.query(`
       UPDATE jobs SET
         status = 'failed',
@@ -336,9 +352,36 @@ export async function saveJob(job) {
   await queryWithTransientRetry(sql, params, { label: 'saveJob' })
 }
 
+function hydrateJobRow(row) {
+  if (!row) return null
+  const job = JSON.parse(row.full_data)
+  job.status = row.status ?? job.status
+  job.step = row.step ?? job.step
+  job.stepLabel = row.step_label ?? job.stepLabel
+  job.error = row.error_message ?? job.error
+  return job
+}
+
 export async function getJob(jobId) {
-  const { rows } = await pool.query('SELECT full_data FROM jobs WHERE job_id = $1', [jobId])
-  return rows[0] ? JSON.parse(rows[0].full_data) : null
+  const { rows } = await pool.query(
+    'SELECT status, step, step_label, error_message, full_data FROM jobs WHERE job_id = $1',
+    [jobId]
+  )
+  return hydrateJobRow(rows[0])
+}
+
+export async function listRecoverableJobs({ limit = 20 } = {}) {
+  const { rows } = await pool.query(`
+    SELECT status, step, step_label, error_message, full_data
+    FROM jobs
+    WHERE status = 'pending'
+    ORDER BY created_at ASC
+    LIMIT $1
+  `, [limit])
+  return rows.map(hydrateJobRow).filter(job => {
+    const mode = job.generationMode || 'single_pass'
+    return mode !== 'agentic_segments' && Array.isArray(job.tasks) && job.tasks.length > 0
+  })
 }
 
 export async function listJobs({ limit = 50, offset = 0, status = null, sortBy = 'time', published = false, unpublished = false, productId = null } = {}) {
